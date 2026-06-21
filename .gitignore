@@ -1,0 +1,12 @@
+.gradle/
+.idea/
+local.properties
+**/build/
+*.iml
+captures/
+app/release/
+outputs/
+work/
+.DS_Store
+__pycache__/
+*.py[cod]

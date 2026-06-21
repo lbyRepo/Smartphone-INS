@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Smartphone INS</string>
+    <string name="service_channel">INS navigation</string>
+    <string name="service_description">Continuous sensor fusion and output</string>
+</resources>

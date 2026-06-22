@@ -1,4 +1,4 @@
-# Decimeter route, fixed-mount, and ZUPT verification · version 0.3.0
+# Decimeter route, fixed-mount, and ZUPT verification · version 0.3.1
 
 ## Scenario
 
@@ -9,6 +9,7 @@ GNSS aiding is intentionally disabled for 20 moving fixes while every raw fix re
 ## Acceptance evidence
 
 - Dashboard history retains 199 INS points and 199 raw-GNSS points from the initialization origin; the final plotted point is more than 100 m from that origin.
+- A native-view pixel regression requires more than 2,000 solid INS-colored pixels from a multi-segment test route. The completed emulator replay was visually inspected with a visible 570.7 m INS trail, start marker, latest marker, and dashed GNSS comparison.
 - During the forced aiding pause, raw GNSS remains visible, the UI reports `GNSS visible · aiding paused`, and INS–GNSS separation reaches 221.021 m.
 - After GNSS aiding resumes, separation is 0.000 m by the third subsequent fix; maximum steadily aided position error is 7.310 m.
 - Initialized roll and pitch remain fixed-mounted: their full-route ranges are 0.362° and 0.120°. Heading remains dynamic and changes by 177.238°.

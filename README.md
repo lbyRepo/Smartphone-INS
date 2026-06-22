@@ -2,7 +2,7 @@
 
 Android 13+ phone INS demonstrator with a 100 Hz binary output stream, WGS84/NED output, automatic or manual initialization, deterministic replay, explicit stationary constraints, and simulator-focused UI validation.
 
-Version 0.3.0 keeps the complete INS and raw-GNSS track history from initialization and drives the Dashboard map from changing navigation epochs. Its packaged Pixel 4 route replay deliberately pauses GNSS aiding for 20 fixes while still displaying raw GNSS, exposes the resulting inertial drift, and immediately corrects position and velocity when aiding resumes. A fixed-mount constraint preserves the initialized roll and pitch while GNSS course remains free to correct heading. Confirmed stationary periods apply a zero-velocity and fixed-position update while continuing inertial-bias learning.
+Version 0.3.1 fixes a Dashboard rendering defect where history counters advanced but the Canvas kept displaying only a stationary marker. The map now hands immutable trail snapshots to an explicitly invalidated native plot surface, draws a solid INS history and dashed raw-GNSS history, fits the accumulated route, marks initialization/latest positions, and reports displacement from initialization. Its packaged Pixel 4 route replay still deliberately pauses GNSS aiding and reacquires it so divergence and correction remain visible.
 
 Open this folder in Android Studio Narwhal or build from the terminal:
 
@@ -27,6 +27,6 @@ sdkmanager --install "system-images;android-36;google_apis;arm64-v8a"
 
 Those tests start the real foreground service, replay the packaged 199-epoch Pixel 4 reference route, assert raw IMU/magnetometer/GNSS reach application state, exercise deliberate aiding suspension and reacquisition, and measure 500 production TCP frames for runtime rate, sequence continuity, CRC, and queue drops.
 
-Version 0.3.0 passes all 13 managed-device tests on the API 36 Medium Phone. The Android service delivered 500 consecutive frames at 99.935 Hz with zero sequence loss or queue drops. The route/map test proves that all 199 initialization-to-latest epochs are retained, the track moves more than 100 m, drift separates during the forced outage, and the solution returns to GNSS after reacquisition.
+Version 0.3.1 passes all 14 managed-device tests on the API 36 Medium Phone. The Android service delivered 500 consecutive frames at 100.606 Hz with zero sequence loss or queue drops. In addition to route/history assertions, a rendered-pixel regression requires a real multi-segment INS polyline, preventing a history counter or marker from masquerading as a working plot.
 
 The stationary navigation regression runs 12,001 biased IMU samples at 100 Hz with 121 noisy valid 3D GNSS fixes at 1 Hz. It asserts bounded position and zero velocity plus less than 0.2° roll, pitch, and yaw change after settling. The separate Decimeter route report proves roll/pitch remain within 0.4°/0.2° while heading changes by more than 177°. Reports are generated under `navigation/build/reports`.

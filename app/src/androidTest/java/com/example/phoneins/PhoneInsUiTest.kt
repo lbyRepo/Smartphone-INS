@@ -1,6 +1,10 @@
 package com.example.phoneins
 
 import android.Manifest
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.view.View
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -24,6 +28,9 @@ import com.example.phoneins.navigation.NavigationEngine
 import com.example.phoneins.navigation.QualityFlag
 import com.example.phoneins.navigation.Vec3
 import com.example.phoneins.ui.PositionMapState
+import com.example.phoneins.ui.PositionPlotData
+import com.example.phoneins.ui.PositionPlotPalette
+import com.example.phoneins.ui.PositionPlotView
 import com.example.phoneins.ui.toLocalMetresForTest
 import org.junit.After
 import org.junit.Rule
@@ -93,7 +100,7 @@ class PhoneInsUiTest {
     @Test
     fun dashboardContainsInsAndRawGnssPositionMap() {
         composeRule.onNodeWithTag("position_map").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Local map comparing INS and raw GNSS positions from the initialization origin").fetchSemanticsNode()
+        composeRule.onNodeWithContentDescription("Position map with 0 INS history points and 0 raw GNSS history points").fetchSemanticsNode()
         composeRule.onNodeWithText("INS position").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Raw GNSS").assertIsDisplayed()
     }
@@ -165,6 +172,55 @@ class PhoneInsUiTest {
             }
         }
         composeRule.onNodeWithText("Origin 1.3521000, 103.8198000").assertIsDisplayed()
+        composeRule.onNodeWithText("History · INS 2 points · GNSS 0 points").assertIsDisplayed()
+        composeRule.onNodeWithText("INS displacement 15.7 m from initialization").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Position map with 2 INS history points and 0 raw GNSS history points").fetchSemanticsNode()
+    }
+
+    @Test
+    fun nativePositionPlotDrawsHistoricalInsPolylinePixels() {
+        var insPixels = 0
+        composeRule.runOnIdle {
+            val width = 800
+            val height = 600
+            val insColor = Color.rgb(0, 106, 101)
+            val view = PositionPlotView(composeRule.activity).apply {
+                render(
+                    PositionPlotData(
+                        insLocalMetres = (0..60).map { index ->
+                            Vec3(index * 2.0, kotlin.math.sin(index * 0.22) * 45.0, 0.0)
+                        },
+                        gnssLocalMetres = emptyList(),
+                        centreNorthMetres = 60.0,
+                        centreEastMetres = 0.0,
+                        halfSpanMetres = 75.0,
+                        hasOrigin = true,
+                    ),
+                    PositionPlotPalette(
+                        background = Color.rgb(235, 232, 238),
+                        grid = Color.rgb(190, 187, 192),
+                        foreground = Color.BLACK,
+                        ins = insColor,
+                        gnss = Color.rgb(69, 97, 121),
+                    ),
+                )
+                measure(
+                    View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY),
+                )
+                layout(0, 0, width, height)
+            }
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(bitmap))
+            val pixels = IntArray(width * height)
+            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+            insPixels = pixels.count { it == insColor }
+        }
+
+        org.junit.Assert.assertTrue(
+            "Expected a visible multi-segment INS trail, found only $insPixels solid trail pixels",
+            insPixels > 2_000,
+        )
     }
 
     @Test

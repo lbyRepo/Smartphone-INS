@@ -13,9 +13,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -28,6 +27,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.phoneins.BuildConfig
 import com.example.phoneins.data.InsRepository
@@ -35,10 +35,8 @@ import com.example.phoneins.data.InsUiState
 import com.example.phoneins.navigation.*
 import com.example.phoneins.service.NavigationService
 import java.util.Locale
-import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
-import kotlin.math.min
 
 private val LightColors = lightColorScheme(
     primary = androidx.compose.ui.graphics.Color(0xFF006A65),
@@ -291,9 +289,11 @@ internal class PositionMapState {
 }
 
 @Composable
-private fun PositionMapCard(solution: NavigationSolution, mapState: PositionMapState) {
-    val insTrail = mapState.insTrail
-    val gnssTrail = mapState.gnssTrail
+internal fun PositionMapCard(solution: NavigationSolution, mapState: PositionMapState) {
+    // Draw immutable snapshots. Passing SnapshotStateList directly into Canvas can leave the draw
+    // phase observing the original list contents even while the surrounding text recomposes.
+    val insTrail = mapState.insTrail.toList()
+    val gnssTrail = mapState.gnssTrail.toList()
     val insValid = solution.initialized && solution.latitudeDeg.isFinite() && solution.longitudeDeg.isFinite()
     val gnss = solution.latestGnss
     val gnssValid = gnss != null && gnss.latitudeDeg.isFinite() && gnss.longitudeDeg.isFinite()
@@ -312,22 +312,33 @@ private fun PositionMapCard(solution: NavigationSolution, mapState: PositionMapS
     val backgroundColor = MaterialTheme.colorScheme.surfaceVariant
     val arrowColor = MaterialTheme.colorScheme.onSurface
     val gridColor = arrowColor.copy(alpha = 0.16f)
-    val allPoints = remember(insTrail.size, gnssTrail.size, solution.monotonicNanos, gnss?.monotonicNanos, mapState.origin) {
+    val allPoints = buildList {
+        mapState.origin?.let(::add)
+        addAll(insTrail)
+        addAll(gnssTrail)
+    }.ifEmpty {
         buildList {
-            mapState.origin?.let(::add)
-            addAll(insTrail)
-            addAll(gnssTrail)
-        }.ifEmpty {
-            buildList {
-                currentIns?.let(::add)
-                currentGnss?.let(::add)
-            }
+            currentIns?.let(::add)
+            currentGnss?.let(::add)
         }
     }
     val reference = mapState.origin ?: allPoints.firstOrNull()
-    val localPoints = reference?.let { origin -> allPoints.map { it.toLocalMetres(origin) } }.orEmpty()
-    val extent = localPoints.maxOfOrNull { max(abs(it.x), abs(it.y)) } ?: 0.0
-    val halfSpanMetres = niceMapSpan(max(10.0, extent * 1.25))
+    val insLocal = reference?.let { origin -> insTrail.map { it.toLocalMetres(origin) } }.orEmpty()
+    val gnssLocal = reference?.let { origin -> gnssTrail.map { it.toLocalMetres(origin) } }.orEmpty()
+    val localPoints = buildList {
+        add(Vec3.ZERO)
+        addAll(insLocal)
+        addAll(gnssLocal)
+    }
+    val northMin = localPoints.minOfOrNull { it.x } ?: 0.0
+    val northMax = localPoints.maxOfOrNull { it.x } ?: 0.0
+    val eastMin = localPoints.minOfOrNull { it.y } ?: 0.0
+    val eastMax = localPoints.maxOfOrNull { it.y } ?: 0.0
+    val centreNorth = (northMin + northMax) * 0.5
+    val centreEast = (eastMin + eastMax) * 0.5
+    val requiredHalfSpan = max((northMax - northMin) * 0.5, (eastMax - eastMin) * 0.5)
+    val halfSpanMetres = niceMapSpan(max(10.0, requiredHalfSpan * 1.12))
+    val insDisplacementMetres = insLocal.lastOrNull()?.norm()
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -336,48 +347,35 @@ private fun PositionMapCard(solution: NavigationSolution, mapState: PositionMapS
             Text("±${halfSpanMetres.f(0)} m", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Card(Modifier.fillMaxWidth().testTag("position_map")) {
-            Canvas(
-                Modifier
+            AndroidView(
+                factory = { PositionPlotView(it) },
+                modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 240.dp)
-                    .semantics { contentDescription = "Local map comparing INS and raw GNSS positions from the initialization origin" },
-            ) {
-                drawRect(backgroundColor)
-                val center = Offset(size.width / 2f, size.height / 2f)
-                val pixelsPerMetre = (min(size.width, size.height) * 0.42 / halfSpanMetres).toFloat()
-                for (fraction in listOf(-1f, -0.5f, 0f, 0.5f, 1f)) {
-                    val x = center.x + fraction * halfSpanMetres.toFloat() * pixelsPerMetre
-                    val y = center.y + fraction * halfSpanMetres.toFloat() * pixelsPerMetre
-                    drawLine(gridColor, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.dp.toPx())
-                    drawLine(gridColor, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
-                }
-                fun map(point: TrailPoint): Offset {
-                    val local = reference?.let { point.toLocalMetres(it) } ?: Vec3.ZERO
-                    return Offset(center.x + local.y.toFloat() * pixelsPerMetre, center.y - local.x.toFloat() * pixelsPerMetre)
-                }
-                fun trail(points: List<TrailPoint>, color: Color) {
-                    points.zipWithNext().forEach { (a, b) ->
-                        drawLine(color.copy(alpha = 0.65f), map(a), map(b), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
-                    }
-                }
-                trail(gnssTrail, gnssColor)
-                trail(insTrail, insColor)
-                if (reference != null) {
-                    drawCircle(arrowColor.copy(alpha = 0.75f), 5.dp.toPx(), center, style = Stroke(2.dp.toPx()))
-                }
-                (gnssTrail.lastOrNull() ?: currentGnss)?.let { point ->
-                    drawCircle(gnssColor, 10.dp.toPx(), map(point), style = Stroke(3.dp.toPx()))
-                }
-                (insTrail.lastOrNull() ?: currentIns)?.let { point ->
-                    val marker = map(point)
-                    drawCircle(insColor, 6.dp.toPx(), marker)
-                    drawLine(Color.White, marker - Offset(4.dp.toPx(), 0f), marker + Offset(4.dp.toPx(), 0f), 2.dp.toPx())
-                    drawLine(Color.White, marker - Offset(0f, 4.dp.toPx()), marker + Offset(0f, 4.dp.toPx()), 2.dp.toPx())
-                }
-                drawLine(arrowColor, Offset(size.width - 28.dp.toPx(), 34.dp.toPx()), Offset(size.width - 28.dp.toPx(), 14.dp.toPx()), 2.dp.toPx())
-                drawLine(arrowColor, Offset(size.width - 28.dp.toPx(), 14.dp.toPx()), Offset(size.width - 34.dp.toPx(), 22.dp.toPx()), 2.dp.toPx())
-                drawLine(arrowColor, Offset(size.width - 28.dp.toPx(), 14.dp.toPx()), Offset(size.width - 22.dp.toPx(), 22.dp.toPx()), 2.dp.toPx())
-            }
+                    .testTag("position_map_canvas")
+                    .semantics {
+                        contentDescription = "Position map with ${insTrail.size} INS history points and ${gnssTrail.size} raw GNSS history points"
+                    },
+                update = { view ->
+                    view.render(
+                        PositionPlotData(
+                            insLocalMetres = insLocal,
+                            gnssLocalMetres = gnssLocal,
+                            centreNorthMetres = centreNorth,
+                            centreEastMetres = centreEast,
+                            halfSpanMetres = halfSpanMetres,
+                            hasOrigin = reference != null,
+                        ),
+                        PositionPlotPalette(
+                            background = backgroundColor.toArgb(),
+                            grid = gridColor.toArgb(),
+                            foreground = arrowColor.toArgb(),
+                            ins = insColor.toArgb(),
+                            gnss = gnssColor.toArgb(),
+                        ),
+                    )
+                },
+            )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
             MapLegend(insColor, "INS position", filled = true)
@@ -398,6 +396,14 @@ private fun PositionMapCard(solution: NavigationSolution, mapState: PositionMapS
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.testTag("position_history_count"),
         )
+        insDisplacementMetres?.let {
+            Text(
+                "INS displacement ${it.f(1)} m from initialization",
+                fontSize = 14.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.testTag("ins_displacement"),
+            )
+        }
         if (separationMetres != null) {
             Text(
                 "INS–GNSS separation ${separationMetres.f(1)} m",

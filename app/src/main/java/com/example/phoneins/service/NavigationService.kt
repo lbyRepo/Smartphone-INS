@@ -39,6 +39,7 @@ class NavigationService : Service() {
     private var autoRequestedNanos: Long? = null
     @Volatile private var latestGnss: GnssFix? = null
     @Volatile private var latestMag: MagSample? = null
+    @Volatile private var replayClockNanos: Long? = null
     private val stationaryImu = ArrayDeque<TimedImuSample>()
     private val imuCounter = AtomicLong(0)
     private var packetCounter = 0L
@@ -177,7 +178,7 @@ class NavigationService : Service() {
                 }
                 if (autoRequestedNanos != null) tryAutomaticInitialization()
 
-                val solution = engine.snapshot(target, System.currentTimeMillis())
+                val solution = engine.snapshot(replayClockNanos ?: target, System.currentTimeMillis())
                 val frame = InsProtocol.encode(solution)
                 tcp.offer(frame); aoa.offer(frame); recorder.append(frame)
                 packetCounter++
@@ -286,16 +287,21 @@ class NavigationService : Service() {
             simulated = true
             engine.reset(MotionProfile.VEHICLE)
             stationaryImu.clear()
+            replayClockNanos = null
             InsRepository.update { it.copy(simulated = true, replaying = true, statusMessage = "Replaying public Pixel 4 sensor data") }
             runCatching {
                 GoogleDatasetReplay(this@NavigationService).run(
                     initialize = { engine.initializeManual(it) },
-                    onImu = ::acceptImu,
+                    onImu = { sample -> replayClockNanos = sample.monotonicNanos; acceptImu(sample) },
                     onMag = ::acceptMag,
-                    onGnss = ::acceptGnss,
+                    onGnss = { fix, aidingEnabled ->
+                        replayClockNanos = fix.monotonicNanos
+                        latestGnss = fix
+                        if (aidingEnabled) engine.processGnss(fix) else engine.observeGnssWithoutAiding(fix)
+                    },
                 )
             }.onSuccess {
-                InsRepository.update { it.copy(replaying = false, statusMessage = "Public dataset replay complete · acceptance test 1.111 m max") }
+                InsRepository.update { it.copy(replaying = false, statusMessage = "Pixel 4 route complete · outage and reacquisition exercised") }
             }.onFailure { error ->
                 InsRepository.update { it.copy(replaying = false, statusMessage = "Dataset replay failed: ${error.message}") }
             }
@@ -306,6 +312,7 @@ class NavigationService : Service() {
 
     private fun solutionStatus(solution: NavigationSolution) = when {
         !solution.initialized -> if (autoRequestedNanos != null) InsRepository.state.value.statusMessage else "Running · awaiting initialization"
+        solution.qualityFlags and QualityFlag.GNSS_AIDING_SUSPENDED != 0 -> "GNSS visible · aiding paused · dead reckoning"
         solution.degraded -> "Dead reckoning · GNSS stale"
         solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> "GNSS fix present · correction rejected"
         solution.qualityFlags and QualityFlag.STATIONARY_CONSTRAINT != 0 -> "GNSS valid · stationary hold"

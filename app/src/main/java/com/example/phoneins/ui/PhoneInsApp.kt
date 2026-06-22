@@ -231,6 +231,7 @@ private fun DashboardScreen(state: InsUiState, positionMapState: PositionMapStat
 private fun StatusBanner(solution: NavigationSolution) {
     val color = when {
         !solution.initialized -> MaterialTheme.colorScheme.surfaceVariant
+        solution.qualityFlags and QualityFlag.GNSS_AIDING_SUSPENDED != 0 -> MaterialTheme.colorScheme.tertiaryContainer
         solution.degraded -> MaterialTheme.colorScheme.errorContainer
         solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> MaterialTheme.colorScheme.errorContainer
         solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID == 0 -> MaterialTheme.colorScheme.tertiaryContainer
@@ -238,6 +239,7 @@ private fun StatusBanner(solution: NavigationSolution) {
     }
     val title = when {
         !solution.initialized -> "Waiting for initialization"
+        solution.qualityFlags and QualityFlag.GNSS_AIDING_SUSPENDED != 0 -> "GNSS visible · aiding paused"
         solution.degraded -> "Dead reckoning · GNSS stale"
         solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> "GNSS fix present · aiding rejected"
         solution.qualityFlags and QualityFlag.STATIONARY_CONSTRAINT != 0 -> "GNSS-aided · stationary hold"
@@ -253,16 +255,16 @@ private fun StatusBanner(solution: NavigationSolution) {
     }
 }
 
-private data class TrailPoint(val monotonicNanos: Long, val latitudeDeg: Double, val longitudeDeg: Double)
+internal data class TrailPoint(val monotonicNanos: Long, val latitudeDeg: Double, val longitudeDeg: Double)
 
-private class PositionMapState {
+internal class PositionMapState {
     val insTrail = mutableStateListOf<TrailPoint>()
     val gnssTrail = mutableStateListOf<TrailPoint>()
     var origin by mutableStateOf<TrailPoint?>(null)
         private set
     private var lastSequence: Long? = null
 
-    fun update(solution: NavigationSolution) {
+    internal fun update(solution: NavigationSolution) {
         val sequenceReset = lastSequence?.let { solution.sequence < it } == true
         if (!solution.initialized || sequenceReset) {
             clear()
@@ -390,6 +392,12 @@ private fun PositionMapCard(solution: NavigationSolution, mapState: PositionMapS
                 modifier = Modifier.testTag("position_map_origin"),
             )
         }
+        Text(
+            "History · INS ${insTrail.size} points · GNSS ${gnssTrail.size} points",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.testTag("position_history_count"),
+        )
         if (separationMetres != null) {
             Text(
                 "INS–GNSS separation ${separationMetres.f(1)} m",
@@ -429,10 +437,10 @@ private fun MapLegend(color: Color, label: String, filled: Boolean) {
 
 private fun appendTrail(trail: MutableList<TrailPoint>, point: TrailPoint) {
     val previous = trail.lastOrNull()
-    if (previous == null || point.monotonicNanos - previous.monotonicNanos >= 1_000_000_000L ||
-        point.toLocalMetres(previous).let { max(abs(it.x), abs(it.y)) } >= 0.25) {
+    val elapsed = previous?.let { point.monotonicNanos - it.monotonicNanos } ?: Long.MAX_VALUE
+    val distance = previous?.let { point.toLocalMetres(it).let { local -> kotlin.math.hypot(local.x, local.y) } } ?: Double.POSITIVE_INFINITY
+    if (previous == null || elapsed >= 1_000_000_000L || (elapsed >= 100_000_000L && distance >= 1.0)) {
         trail += point
-        while (trail.size > 180) trail.removeAt(0)
     }
 }
 
@@ -441,6 +449,8 @@ private fun TrailPoint.toLocalMetres(origin: TrailPoint): Vec3 {
     val east = (longitudeDeg - origin.longitudeDeg) * 111_320.0 * cos(Math.toRadians(origin.latitudeDeg))
     return Vec3(north, east, 0.0)
 }
+
+internal fun TrailPoint.toLocalMetresForTest(origin: TrailPoint): Vec3 = toLocalMetres(origin)
 
 private fun niceMapSpan(required: Double): Double = listOf(10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0)
     .firstOrNull { it >= required } ?: required
@@ -524,6 +534,7 @@ internal fun RawDataScreen(state: InsUiState) {
                     "INS aiding",
                     when {
                         state.solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> "REJECTED"
+                        state.solution.qualityFlags and QualityFlag.GNSS_AIDING_SUSPENDED != 0 -> "PAUSED"
                         state.solution.qualityFlags and QualityFlag.STATIONARY_CONSTRAINT != 0 -> "STATIONARY HOLD"
                         state.solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0 -> "APPLIED"
                         else -> "NOT APPLIED"

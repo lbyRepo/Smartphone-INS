@@ -1,68 +1,39 @@
 package com.example.phoneins.service
 
 import android.content.Context
-import com.example.phoneins.navigation.*
+import com.example.phoneins.navigation.DecimeterRouteScenario
+import com.example.phoneins.navigation.MagSample
+import com.example.phoneins.navigation.ManualInitialization
+import com.example.phoneins.navigation.TimedImuSample
+import com.example.phoneins.navigation.Vec3
 import kotlinx.coroutines.delay
-import kotlin.math.cos
-import kotlin.math.sin
 
-/** Replays the packaged public Pixel 4 fixture through the same callbacks as live hardware. */
+/** Replays the bundled 199-second Pixel 4 reference route with a deliberate moving GNSS outage. */
 class GoogleDatasetReplay(private val context: Context) {
     suspend fun run(
         initialize: (ManualInitialization) -> Unit,
         onImu: (TimedImuSample) -> Unit,
         onMag: (MagSample) -> Unit,
-        onGnss: (GnssFix) -> Unit,
+        onGnss: (fix: com.example.phoneins.navigation.GnssFix, aidingEnabled: Boolean) -> Unit,
     ) {
-        val truthLine = context.assets.open("google_decimeter_2021/Pixel4_ground_truth.csv").bufferedReader().useLines { it.drop(1).first() }
-        val truth = truthLine.split(',')
-        initialize(ManualInitialization(truth[3].toDouble(), truth[4].toDouble(), truth[5].toDouble(), 0.0, 0.0, truth[10].toDouble()))
+        val route = context.assets.open("google_decimeter_2021/Pixel4_ground_truth.csv")
+            .bufferedReader()
+            .useLines { DecimeterRouteScenario.parseGroundTruth(it) }
+        require(route.size > DecimeterRouteScenario.OUTAGE_END_INDEX) { "Pixel 4 route fixture is incomplete" }
+        val first = route.first()
+        val replayStart = android.os.SystemClock.elapsedRealtimeNanos()
+        initialize(ManualInitialization(first.latitudeDeg, first.longitudeDeg, first.altitudeM, 0.0, 0.0, first.courseDeg))
+        onMag(MagSample(replayStart, Vec3(28.0, -5.0, 36.0)))
+        onGnss(DecimeterRouteScenario.gnssFix(first, first, replayStart), true)
 
-        val lines = context.assets.open("google_decimeter_2021/Pixel4_GnssLog.txt").bufferedReader().readLines()
-            .filter { it.isNotBlank() && !it.startsWith('#') }
-            .mapNotNull { line ->
-                val f = line.split(',')
-                when (f[0]) {
-                    "Accel", "Gyro", "Mag" -> f[1].toLong() to f
-                    "Fix" -> if (f[1] == "GPS") f[8].toLong() to f else null
-                    else -> null
-                }
-            }.sortedBy { it.first }
-        if (lines.isEmpty()) return
-        var previousUnix = lines.first().first
-        var firstSensorUnix = lines.first().first
-        val replayStartMonotonic = android.os.SystemClock.elapsedRealtimeNanos()
-        var acceleration = Vec3(0.0, 0.0, -9.80665)
-        for ((unix, f) in lines) {
-            delay((unix - previousUnix).coerceIn(0, 1_000))
-            previousUnix = unix
-            when (f[0]) {
-                "Accel" -> {
-                    val native = Vec3(f[3].toDouble(), f[4].toDouble(), f[5].toDouble())
-                    acceleration = Vec3(native.y, native.x, -native.z)
-                }
-                "Gyro" -> {
-                    val native = Vec3(f[3].toDouble(), f[4].toDouble(), f[5].toDouble())
-                    val monotonic = replayStartMonotonic + (unix - firstSensorUnix) * 1_000_000
-                    onImu(TimedImuSample(monotonic, acceleration, Vec3(native.y, native.x, -native.z)))
-                }
-                "Mag" -> {
-                    val native = Vec3(f[3].toDouble(), f[4].toDouble(), f[5].toDouble())
-                    val monotonic = replayStartMonotonic + (unix - firstSensorUnix) * 1_000_000
-                    onMag(MagSample(monotonic, Vec3(native.y, native.x, -native.z)))
-                }
-                "Fix" -> {
-                    val speed = f[5].toDouble(); val bearing = Math.toRadians(f[7].toDouble())
-                    val monotonic = replayStartMonotonic + (unix - firstSensorUnix) * 1_000_000
-                    onGnss(GnssFix(
-                        monotonic, unix, f[2].toDouble(), f[3].toDouble(), f[4].toDouble(),
-                        Vec3(speed * cos(bearing), speed * sin(bearing), Double.NaN),
-                        f[6].toDouble(), 50.0, f[9].toDouble().coerceAtLeast(0.1),
-                        f[10].toDouble().takeIf { it > 0 } ?: 180.0, 0,
-                        hasHorizontalVelocity = speed > 0.05, isMock = true,
-                    ))
-                }
+        for (index in 1 until route.size) {
+            DecimeterRouteScenario.imuBetween(route[index - 1], route[index], first, replayStart).forEach(onImu)
+            if (index % 10 == 0) {
+                onMag(MagSample(DecimeterRouteScenario.monotonicNanos(route[index], first, replayStart), Vec3(28.0, -5.0, 36.0)))
             }
+            val aidingEnabled = index !in DecimeterRouteScenario.OUTAGE_START_INDEX until DecimeterRouteScenario.OUTAGE_END_INDEX
+            onGnss(DecimeterRouteScenario.gnssFix(route[index], first, replayStart), aidingEnabled)
+            delay(40)
         }
     }
 }

@@ -74,6 +74,7 @@ object QualityFlag {
     const val MAGNETOMETER_INITIALIZATION = 1 shl 13
     const val STATIONARY_CONSTRAINT = 1 shl 14
     const val GNSS_UPDATE_REJECTED = 1 shl 15
+    const val GNSS_AIDING_SUSPENDED = 1 shl 16
 }
 
 data class NavigationSolution(

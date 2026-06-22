@@ -14,6 +14,8 @@ class NavigationEngine(
     private var positionEcef = Vec3.ZERO
     private var velocityEcef = Vec3.ZERO
     private var bodyToEcef = Quaternion.IDENTITY
+    private var fixedMountRollRad = 0.0
+    private var fixedMountPitchRad = 0.0
     private var accelerometerBias = Vec3.ZERO
     private var gyroBias = Vec3.ZERO
     private var covariance = DoubleArray(STATE_SIZE * STATE_SIZE)
@@ -29,7 +31,9 @@ class NavigationEngine(
     private var lastOutputOverrun = false
     private val recentImu = ArrayDeque<TimedImuSample>()
     private var imuStationary = false
+    private var imuClearlyMoving = false
     private var gnssStationaryUntilNanos = Long.MIN_VALUE
+    private var consecutiveStationaryGnssFixes = 0
     private var stationaryConstrained = false
     private var stationaryAnchorEcef: Vec3? = null
     private var stationaryAttitudeAnchor: Quaternion? = null
@@ -37,6 +41,7 @@ class NavigationEngine(
     private var lastGnssPositionUpdateNanos = Long.MIN_VALUE
     private var lastGnssVelocityUpdateNanos = Long.MIN_VALUE
     private var lastGnssUpdateRejected = false
+    private var gnssAidingSuspended = false
     private var rejectedPositionCandidate: Vec3? = null
     private var rejectedPositionCandidateCount = 0
     private var rejectedVelocityCandidate: Vec3? = null
@@ -52,6 +57,8 @@ class NavigationEngine(
         positionEcef = Vec3.ZERO
         velocityEcef = Vec3.ZERO
         bodyToEcef = Quaternion.IDENTITY
+        fixedMountRollRad = 0.0
+        fixedMountPitchRad = 0.0
         accelerometerBias = Vec3.ZERO
         gyroBias = Vec3.ZERO
         lastImu = null
@@ -65,7 +72,9 @@ class NavigationEngine(
         lastOutputOverrun = false
         recentImu.clear()
         imuStationary = false
+        imuClearlyMoving = false
         gnssStationaryUntilNanos = Long.MIN_VALUE
+        consecutiveStationaryGnssFixes = 0
         stationaryConstrained = false
         stationaryAnchorEcef = null
         stationaryAttitudeAnchor = null
@@ -73,6 +82,7 @@ class NavigationEngine(
         lastGnssPositionUpdateNanos = Long.MIN_VALUE
         lastGnssVelocityUpdateNanos = Long.MIN_VALUE
         lastGnssUpdateRejected = false
+        gnssAidingSuspended = false
         rejectedPositionCandidate = null
         rejectedPositionCandidateCount = 0
         rejectedVelocityCandidate = null
@@ -108,6 +118,8 @@ class NavigationEngine(
             Math.toRadians(((request.yawDeg % 360) + 360) % 360),
         )
         bodyToEcef = Quaternion.fromMatrix(multiply3(nedToEcef, bodyToNed))
+        fixedMountRollRad = Math.toRadians(request.rollDeg)
+        fixedMountPitchRad = Math.toRadians(request.pitchDeg)
         gyroBias = stationaryAngularRate
         accelerometerBias = stationaryAcceleration - multiply3(transpose3(bodyToEcef.toMatrix()), gravityEcef(positionEcef) * -1.0)
         initSource = InitSource.MANUAL
@@ -143,6 +155,8 @@ class NavigationEngine(
         val nedToEcef = transpose3(ecefToNedMatrix(geo.latitudeRad, geo.longitudeRad))
         velocityEcef = multiply3(nedToEcef, gnss.velocityNedMps)
         bodyToEcef = Quaternion.fromMatrix(multiply3(nedToEcef, bodyToNedMatrix(roll, pitch, yaw)))
+        fixedMountRollRad = roll
+        fixedMountPitchRad = pitch
         gyroBias = stationaryAngularRate
         accelerometerBias = stationaryAcceleration - multiply3(transpose3(bodyToEcef.toMatrix()), gravityEcef(positionEcef) * -1.0)
         initSource = InitSource.AUTOMATIC
@@ -173,11 +187,14 @@ class NavigationEngine(
         velocityEcef = velocityEcef + accelerationEcef * dt
         propagateCovariance(bodySpecificForce, dt)
         applyStationaryConstraint(sample)
+        if (!isStationaryAt(sample.monotonicNanos)) stabilizeFixedMountTilt(FIXED_MOUNT_IMU_ALPHA)
     }
 
     @Synchronized
     fun processGnss(fix: GnssFix) {
         if (!validFix(fix)) return
+        val resumingSuspendedAiding = gnssAidingSuspended
+        gnssAidingSuspended = false
         val previousFix = lastGnss
         lastGnss = fix
         if (initSource == InitSource.NONE) return
@@ -205,7 +222,7 @@ class NavigationEngine(
             lastGnssPositionUpdateNanos = fix.monotonicNanos
             rejectedPositionCandidate = null
             rejectedPositionCandidateCount = 0
-        } else if (positionConsistentWithPreviousFix(fix, previousFix, measuredPosition) ||
+        } else if (resumingSuspendedAiding || positionConsistentWithPreviousFix(fix, previousFix, measuredPosition) ||
             trackConsistentRejectedPosition(measuredPosition, horizontalNoise)
         ) {
             reanchorPosition(measuredPosition, horizontalNoise, verticalNoise)
@@ -233,7 +250,7 @@ class NavigationEngine(
                 lastGnssVelocityUpdateNanos = fix.monotonicNanos
                 rejectedVelocityCandidate = null
                 rejectedVelocityCandidateCount = 0
-            } else if (velocityConsistentWithPreviousFix(fix, previousFix, measuredVelocity, speedNoise) ||
+            } else if (resumingSuspendedAiding || velocityConsistentWithPreviousFix(fix, previousFix, measuredVelocity, speedNoise) ||
                 trackConsistentRejectedVelocity(measuredVelocity, speedNoise)
             ) {
                 reanchorVelocity(measuredVelocity, speedNoise, downNoise)
@@ -253,6 +270,20 @@ class NavigationEngine(
         lastGnssUpdateRejected = !positionAccepted || (velocityUsable && !velocityAccepted)
         updateCourseAiding(fix)
         if (isStationaryAt(fix.monotonicNanos)) holdStationaryAttitude()
+        else stabilizeFixedMountTilt(FIXED_MOUNT_GNSS_ALPHA)
+    }
+
+    /** Records a fresh raw fix for display while intentionally withholding all filter corrections. */
+    @Synchronized
+    fun observeGnssWithoutAiding(fix: GnssFix) {
+        if (!validFix(fix)) return
+        val previousFix = lastGnss
+        lastGnss = fix
+        gnssAidingSuspended = true
+        lastGnssUpdateRejected = false
+        courseAided = false
+        val altitude = if (fix.hasAltitude && fix.altitudeEllipsoidM.isFinite()) fix.altitudeEllipsoidM else ecefToGeodetic(positionEcef).altitudeM
+        updateGnssStationarity(fix, previousFix, geodeticToEcef(fix.latitudeDeg, fix.longitudeDeg, altitude))
     }
 
     @Synchronized
@@ -285,10 +316,10 @@ class NavigationEngine(
             else -> FixStatus.FIX_2D
         }
         var flags = QualityFlag.INITIALIZED
-        if (!gnssFresh) flags = flags or QualityFlag.DEGRADED or QualityFlag.DEAD_RECKONING
         flags = flags or if (imuFresh) QualityFlag.IMU_FRESH else QualityFlag.IMU_HELD
         val positionAided = monotonicNanos - lastGnssPositionUpdateNanos in 0..GNSS_STALE_NANOS
         val velocityAided = monotonicNanos - lastGnssVelocityUpdateNanos in 0..GNSS_STALE_NANOS
+        if (!positionAided) flags = flags or QualityFlag.DEGRADED or QualityFlag.DEAD_RECKONING
         if (positionAided) flags = flags or QualityFlag.GNSS_POSITION_VALID
         if (velocityAided) flags = flags or QualityFlag.GNSS_HORIZONTAL_VELOCITY_VALID
         if (velocityAided && lastGnss?.hasDerivedDownVelocity == true) flags = flags or QualityFlag.GNSS_DOWN_VELOCITY_VALID
@@ -300,6 +331,7 @@ class NavigationEngine(
         if (lastGnss?.isMock == true) flags = flags or QualityFlag.MOCK_GNSS
         if (stationaryConstrained && isStationaryAt(monotonicNanos)) flags = flags or QualityFlag.STATIONARY_CONSTRAINT
         if (gnssFresh && lastGnssUpdateRejected) flags = flags or QualityFlag.GNSS_UPDATE_REJECTED
+        if (gnssFresh && gnssAidingSuspended) flags = flags or QualityFlag.GNSS_AIDING_SUSPENDED
 
         val positionStd = Vec3(sqrtDiag(POSITION), sqrtDiag(POSITION + 1), sqrtDiag(POSITION + 2))
         val velocityStd = Vec3(sqrtDiag(VELOCITY), sqrtDiag(VELOCITY + 1), sqrtDiag(VELOCITY + 2))
@@ -474,6 +506,7 @@ class NavigationEngine(
         }
         if (recentImu.size < 30 || sample.monotonicNanos - recentImu.first().monotonicNanos < 600_000_000L) {
             imuStationary = false
+            imuClearlyMoving = false
             stationaryAttitudeAnchor = null
             return
         }
@@ -483,6 +516,8 @@ class NavigationEngine(
         val angularRateRms = sqrt(recentImu.sumOf { (it.angularRateRadps - meanAngularRate).norm().pow(2) } / recentImu.size)
         imuStationary = abs(meanAcceleration.norm() - STANDARD_GRAVITY) < 0.7 &&
             accelerationRms < 0.22 && meanAngularRate.norm() < 0.08 && angularRateRms < 0.012
+        imuClearlyMoving = abs(meanAcceleration.norm() - STANDARD_GRAVITY) > 2.0 || accelerationRms > 1.2 ||
+            meanAngularRate.norm() > 0.25 || angularRateRms > 0.12
         if (!imuStationary) stationaryAttitudeAnchor = null
     }
 
@@ -498,8 +533,12 @@ class NavigationEngine(
                 if (previous.hasAltitude && previous.altitudeEllipsoidM.isFinite()) previous.altitudeEllipsoidM else ecefToGeodetic(positionEcef).altitudeM,
             )).norm() <= max(5.0, 2.0 * (fix.horizontalAccuracyM + previous.horizontalAccuracyM))
         if (reliableLowSpeed || stablePositionWithoutVelocity) {
-            gnssStationaryUntilNanos = fix.monotonicNanos + STATIONARY_GNSS_HOLD_NANOS
+            consecutiveStationaryGnssFixes++
+            if (consecutiveStationaryGnssFixes >= STATIONARY_GNSS_FIXES_REQUIRED) {
+                gnssStationaryUntilNanos = fix.monotonicNanos + STATIONARY_GNSS_HOLD_NANOS
+            }
         } else if (fix.hasHorizontalVelocity && speed >= STATIONARY_SPEED_MPS) {
+            consecutiveStationaryGnssFixes = 0
             gnssStationaryUntilNanos = Long.MIN_VALUE
             stationaryAnchorEcef = null
             stationaryAttitudeAnchor = null
@@ -507,21 +546,23 @@ class NavigationEngine(
         }
     }
 
-    private fun isStationaryAt(monotonicNanos: Long) = imuStationary && monotonicNanos <= gnssStationaryUntilNanos
+    private fun isStationaryAt(monotonicNanos: Long) = !imuClearlyMoving && monotonicNanos <= gnssStationaryUntilNanos
 
     private fun applyStationaryConstraint(sample: TimedImuSample) {
         stationaryConstrained = false
         if (!isStationaryAt(sample.monotonicNanos)) return
-        if (stationaryAttitudeAnchor == null) stationaryAttitudeAnchor = bodyToEcef
+        if (imuStationary && stationaryAttitudeAnchor == null) stationaryAttitudeAnchor = bodyToEcef
         val meanAcceleration = recentImu.map { it.accelerationMps2 }.averageVec()
         val meanAngularRate = recentImu.map { it.angularRateRadps }.averageVec()
         val expectedSpecificForceBody = multiply3(
             transpose3(bodyToEcef.toMatrix()),
             gravityEcef(positionEcef) * -1.0,
         )
-        accelerometerBias = accelerometerBias * (1.0 - STATIONARY_BIAS_ALPHA) +
-            (meanAcceleration - expectedSpecificForceBody) * STATIONARY_BIAS_ALPHA
-        gyroBias = gyroBias * (1.0 - STATIONARY_BIAS_ALPHA) + meanAngularRate * STATIONARY_BIAS_ALPHA
+        if (imuStationary) {
+            accelerometerBias = accelerometerBias * (1.0 - STATIONARY_BIAS_ALPHA) +
+                (meanAcceleration - expectedSpecificForceBody) * STATIONARY_BIAS_ALPHA
+            gyroBias = gyroBias * (1.0 - STATIONARY_BIAS_ALPHA) + meanAngularRate * STATIONARY_BIAS_ALPHA
+        }
         applyTrustedZeroVelocity()
         stationaryAnchorEcef?.let { anchor ->
             val geo = ecefToGeodetic(anchor)
@@ -534,8 +575,33 @@ class NavigationEngine(
                 gateSigma = Double.POSITIVE_INFINITY,
             )
         }
-        holdStationaryAttitude()
+        if (imuStationary) holdStationaryAttitude()
         stationaryConstrained = true
+    }
+
+    private fun stabilizeFixedMountTilt(alpha: Double) {
+        if (initSource == InitSource.NONE) return
+        val geo = ecefToGeodetic(positionEcef)
+        val ecefToNed = ecefToNedMatrix(geo.latitudeRad, geo.longitudeRad)
+        val current = eulerFromBodyToNed(multiply3(ecefToNed, bodyToEcef.toMatrix()))
+        val currentRoll = Math.toRadians(current.x)
+        val currentPitch = Math.toRadians(current.y)
+        val rollError = wrapRadians(fixedMountRollRad - currentRoll)
+        val pitchError = wrapRadians(fixedMountPitchRad - currentPitch)
+        val roll = (currentRoll + rollError * alpha).coerceIn(
+            fixedMountRollRad - FIXED_MOUNT_MAX_TILT_RAD,
+            fixedMountRollRad + FIXED_MOUNT_MAX_TILT_RAD,
+        )
+        val pitch = (currentPitch + pitchError * alpha).coerceIn(
+            fixedMountPitchRad - FIXED_MOUNT_MAX_TILT_RAD,
+            fixedMountPitchRad + FIXED_MOUNT_MAX_TILT_RAD,
+        )
+        bodyToEcef = Quaternion.fromMatrix(
+            multiply3(
+                transpose3(ecefToNed),
+                bodyToNedMatrix(roll, pitch, Math.toRadians(current.z)),
+            ),
+        )
     }
 
     /**
@@ -629,7 +695,8 @@ class NavigationEngine(
         )
         val previousGeo = ecefToGeodetic(previousPosition)
         val previousVelocity = multiply3(transpose3(ecefToNedMatrix(previousGeo.latitudeRad, previousGeo.longitudeRad)), previous.velocityNedMps)
-        return (measuredVelocity - previousVelocity).norm() <= max(1.0, speedNoise * 6.0)
+        val dt = (fix.monotonicNanos - previous.monotonicNanos) * 1e-9
+        return (measuredVelocity - previousVelocity).norm() <= max(2.5, speedNoise * 6.0 + MAX_PLAUSIBLE_GNSS_ACCELERATION_MPS2 * dt)
     }
 
     private fun reanchorPosition(measuredPosition: Vec3, horizontalNoise: Double, verticalNoise: Double) {
@@ -764,9 +831,14 @@ class NavigationEngine(
         private const val STATIONARY_IMU_WINDOW_NANOS = 1_500_000_000L
         private const val STATIONARY_GNSS_HOLD_NANOS = 2_500_000_000L
         private const val STATIONARY_SPEED_MPS = 0.5
+        private const val STATIONARY_GNSS_FIXES_REQUIRED = 2
         private const val STATIONARY_BIAS_ALPHA = 0.002
+        private const val FIXED_MOUNT_IMU_ALPHA = 1.0
+        private const val FIXED_MOUNT_GNSS_ALPHA = 1.0
+        private val FIXED_MOUNT_MAX_TILT_RAD = Math.toRadians(1.0)
         private const val REACQUISITION_FIX_COUNT = 3
         private const val MAX_GNSS_SPEED_MPS = 120.0
+        private const val MAX_PLAUSIBLE_GNSS_ACCELERATION_MPS2 = 15.0
         private const val AXIS_N = 1 shl 0
         private const val AXIS_E = 1 shl 1
         private const val AXIS_D = 1 shl 2

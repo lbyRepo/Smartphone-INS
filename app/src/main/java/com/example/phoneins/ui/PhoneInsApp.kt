@@ -2,6 +2,7 @@ package com.example.phoneins.ui
 
 import android.content.res.Configuration
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -12,6 +13,10 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -30,6 +35,10 @@ import com.example.phoneins.data.InsUiState
 import com.example.phoneins.navigation.*
 import com.example.phoneins.service.NavigationService
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.min
 
 private val LightColors = lightColorScheme(
     primary = androidx.compose.ui.graphics.Color(0xFF006A65),
@@ -71,6 +80,10 @@ internal fun PhoneInsScaffold(
     val wide = LocalConfiguration.current.screenWidthDp >= 700
     val fontScale = LocalDensity.current.fontScale
     val compactHeader = !wide && fontScale >= 1.8f
+    val positionMapState = remember { PositionMapState() }
+    LaunchedEffect(state.solution.sequence, state.solution.initialized, state.solution.latestGnss?.monotonicNanos) {
+        positionMapState.update(state.solution)
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -116,7 +129,7 @@ internal fun PhoneInsScaffold(
             }
             Box(Modifier.weight(1f).fillMaxHeight()) {
                 when (destination) {
-                    Destination.DASHBOARD -> DashboardScreen(state)
+                    Destination.DASHBOARD -> DashboardScreen(state, positionMapState)
                     Destination.RAW -> RawDataScreen(state)
                     Destination.INITIALIZE -> InitializationScreen(state, sendAction)
                     Destination.SETTINGS -> SessionsScreen(state, sendAction)
@@ -146,6 +159,15 @@ private fun ServiceBadge(running: Boolean, simulated: Boolean, compact: Boolean)
 
 @Composable
 internal fun DashboardScreen(state: InsUiState) {
+    val positionMapState = remember { PositionMapState() }
+    LaunchedEffect(state.solution.sequence, state.solution.initialized, state.solution.latestGnss?.monotonicNanos) {
+        positionMapState.update(state.solution)
+    }
+    DashboardScreen(state, positionMapState)
+}
+
+@Composable
+private fun DashboardScreen(state: InsUiState, positionMapState: PositionMapState) {
     val solution = state.solution
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("dashboard"),
@@ -154,6 +176,9 @@ internal fun DashboardScreen(state: InsUiState) {
     ) {
         item {
             StatusBanner(solution)
+        }
+        item {
+            PositionMapCard(solution, positionMapState)
         }
         item {
             SectionTitle("INS solution")
@@ -207,13 +232,18 @@ private fun StatusBanner(solution: NavigationSolution) {
     val color = when {
         !solution.initialized -> MaterialTheme.colorScheme.surfaceVariant
         solution.degraded -> MaterialTheme.colorScheme.errorContainer
+        solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> MaterialTheme.colorScheme.errorContainer
+        solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID == 0 -> MaterialTheme.colorScheme.tertiaryContainer
         else -> MaterialTheme.colorScheme.primaryContainer
     }
     val title = when {
         !solution.initialized -> "Waiting for initialization"
         solution.degraded -> "Dead reckoning · GNSS stale"
+        solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> "GNSS fix present · aiding rejected"
+        solution.qualityFlags and QualityFlag.STATIONARY_CONSTRAINT != 0 -> "GNSS-aided · stationary hold"
         solution.qualityFlags and QualityFlag.HEADING_COURSE_AIDED != 0 -> "GNSS-aided · course heading"
-        else -> "GNSS-aided · heading coasting"
+        solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0 -> "GNSS-aided · heading coasting"
+        else -> "GNSS fix present · awaiting correction"
     }
     Card(colors = CardDefaults.cardColors(containerColor = color), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -222,6 +252,198 @@ private fun StatusBanner(solution: NavigationSolution) {
         }
     }
 }
+
+private data class TrailPoint(val monotonicNanos: Long, val latitudeDeg: Double, val longitudeDeg: Double)
+
+private class PositionMapState {
+    val insTrail = mutableStateListOf<TrailPoint>()
+    val gnssTrail = mutableStateListOf<TrailPoint>()
+    var origin by mutableStateOf<TrailPoint?>(null)
+        private set
+    private var lastSequence: Long? = null
+
+    fun update(solution: NavigationSolution) {
+        val sequenceReset = lastSequence?.let { solution.sequence < it } == true
+        if (!solution.initialized || sequenceReset) {
+            clear()
+            if (!solution.initialized) return
+        }
+        val insValid = solution.latitudeDeg.isFinite() && solution.longitudeDeg.isFinite()
+        if (insValid) {
+            val point = TrailPoint(solution.monotonicNanos, solution.latitudeDeg, solution.longitudeDeg)
+            if (origin == null) origin = point
+            appendTrail(insTrail, point)
+        }
+        solution.latestGnss?.takeIf { it.latitudeDeg.isFinite() && it.longitudeDeg.isFinite() }?.let {
+            appendTrail(gnssTrail, TrailPoint(it.monotonicNanos, it.latitudeDeg, it.longitudeDeg))
+        }
+        lastSequence = solution.sequence
+    }
+
+    private fun clear() {
+        insTrail.clear()
+        gnssTrail.clear()
+        origin = null
+        lastSequence = null
+    }
+}
+
+@Composable
+private fun PositionMapCard(solution: NavigationSolution, mapState: PositionMapState) {
+    val insTrail = mapState.insTrail
+    val gnssTrail = mapState.gnssTrail
+    val insValid = solution.initialized && solution.latitudeDeg.isFinite() && solution.longitudeDeg.isFinite()
+    val gnss = solution.latestGnss
+    val gnssValid = gnss != null && gnss.latitudeDeg.isFinite() && gnss.longitudeDeg.isFinite()
+    val currentIns = if (insValid) TrailPoint(solution.monotonicNanos, solution.latitudeDeg, solution.longitudeDeg) else null
+    val currentGnss = if (gnssValid) TrailPoint(gnss.monotonicNanos, gnss.latitudeDeg, gnss.longitudeDeg) else null
+    val separationMetres = if (currentIns != null && currentGnss != null) {
+        currentIns.toLocalMetres(currentGnss).norm()
+    } else {
+        null
+    }
+    val gnssBoundMetres = gnss?.horizontalAccuracyM?.takeIf { it.isFinite() }?.let { max(2.0, 3.0 * it) }
+    val positionAided = solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0
+
+    val insColor = MaterialTheme.colorScheme.primary
+    val gnssColor = MaterialTheme.colorScheme.tertiary
+    val backgroundColor = MaterialTheme.colorScheme.surfaceVariant
+    val arrowColor = MaterialTheme.colorScheme.onSurface
+    val gridColor = arrowColor.copy(alpha = 0.16f)
+    val allPoints = remember(insTrail.size, gnssTrail.size, solution.monotonicNanos, gnss?.monotonicNanos, mapState.origin) {
+        buildList {
+            mapState.origin?.let(::add)
+            addAll(insTrail)
+            addAll(gnssTrail)
+        }.ifEmpty {
+            buildList {
+                currentIns?.let(::add)
+                currentGnss?.let(::add)
+            }
+        }
+    }
+    val reference = mapState.origin ?: allPoints.firstOrNull()
+    val localPoints = reference?.let { origin -> allPoints.map { it.toLocalMetres(origin) } }.orEmpty()
+    val extent = localPoints.maxOfOrNull { max(abs(it.x), abs(it.y)) } ?: 0.0
+    val halfSpanMetres = niceMapSpan(max(10.0, extent * 1.25))
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            SectionTitle("Position map")
+            Spacer(Modifier.weight(1f))
+            Text("±${halfSpanMetres.f(0)} m", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Card(Modifier.fillMaxWidth().testTag("position_map")) {
+            Canvas(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 240.dp)
+                    .semantics { contentDescription = "Local map comparing INS and raw GNSS positions from the initialization origin" },
+            ) {
+                drawRect(backgroundColor)
+                val center = Offset(size.width / 2f, size.height / 2f)
+                val pixelsPerMetre = (min(size.width, size.height) * 0.42 / halfSpanMetres).toFloat()
+                for (fraction in listOf(-1f, -0.5f, 0f, 0.5f, 1f)) {
+                    val x = center.x + fraction * halfSpanMetres.toFloat() * pixelsPerMetre
+                    val y = center.y + fraction * halfSpanMetres.toFloat() * pixelsPerMetre
+                    drawLine(gridColor, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.dp.toPx())
+                    drawLine(gridColor, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+                }
+                fun map(point: TrailPoint): Offset {
+                    val local = reference?.let { point.toLocalMetres(it) } ?: Vec3.ZERO
+                    return Offset(center.x + local.y.toFloat() * pixelsPerMetre, center.y - local.x.toFloat() * pixelsPerMetre)
+                }
+                fun trail(points: List<TrailPoint>, color: Color) {
+                    points.zipWithNext().forEach { (a, b) ->
+                        drawLine(color.copy(alpha = 0.65f), map(a), map(b), strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+                    }
+                }
+                trail(gnssTrail, gnssColor)
+                trail(insTrail, insColor)
+                if (reference != null) {
+                    drawCircle(arrowColor.copy(alpha = 0.75f), 5.dp.toPx(), center, style = Stroke(2.dp.toPx()))
+                }
+                (gnssTrail.lastOrNull() ?: currentGnss)?.let { point ->
+                    drawCircle(gnssColor, 10.dp.toPx(), map(point), style = Stroke(3.dp.toPx()))
+                }
+                (insTrail.lastOrNull() ?: currentIns)?.let { point ->
+                    val marker = map(point)
+                    drawCircle(insColor, 6.dp.toPx(), marker)
+                    drawLine(Color.White, marker - Offset(4.dp.toPx(), 0f), marker + Offset(4.dp.toPx(), 0f), 2.dp.toPx())
+                    drawLine(Color.White, marker - Offset(0f, 4.dp.toPx()), marker + Offset(0f, 4.dp.toPx()), 2.dp.toPx())
+                }
+                drawLine(arrowColor, Offset(size.width - 28.dp.toPx(), 34.dp.toPx()), Offset(size.width - 28.dp.toPx(), 14.dp.toPx()), 2.dp.toPx())
+                drawLine(arrowColor, Offset(size.width - 28.dp.toPx(), 14.dp.toPx()), Offset(size.width - 34.dp.toPx(), 22.dp.toPx()), 2.dp.toPx())
+                drawLine(arrowColor, Offset(size.width - 28.dp.toPx(), 14.dp.toPx()), Offset(size.width - 22.dp.toPx(), 22.dp.toPx()), 2.dp.toPx())
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            MapLegend(insColor, "INS position", filled = true)
+            MapLegend(gnssColor, "Raw GNSS", filled = false)
+        }
+        mapState.origin?.let { origin ->
+            Text(
+                "Origin ${origin.latitudeDeg.f(7)}, ${origin.longitudeDeg.f(7)}",
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("position_map_origin"),
+            )
+        }
+        if (separationMetres != null) {
+            Text(
+                "INS–GNSS separation ${separationMetres.f(1)} m",
+                fontSize = 14.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.testTag("position_separation"),
+            )
+            val boundText = when {
+                positionAided && gnssBoundMetres != null && separationMetres <= gnssBoundMetres + 0.05 ->
+                    "GNSS bound active · within ${gnssBoundMetres.f(1)} m"
+                positionAided && gnssBoundMetres != null ->
+                    "AIDING LIMIT EXCEEDED · expected within ${gnssBoundMetres.f(1)} m"
+                else -> "GNSS correction is not currently applied"
+            }
+            Text(
+                boundText,
+                fontSize = 12.sp,
+                color = if (boundText.startsWith("AIDING LIMIT")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("position_bound_status"),
+            )
+        }
+        if (!insValid && !gnssValid) {
+            Text("Start and initialize navigation to plot positions.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun MapLegend(color: Color, label: String, filled: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Canvas(Modifier.size(16.dp)) {
+            if (filled) drawCircle(color, size.minDimension / 2) else drawCircle(color, size.minDimension / 2 - 1.dp.toPx(), style = Stroke(2.dp.toPx()))
+        }
+        Text(label, fontSize = 14.sp)
+    }
+}
+
+private fun appendTrail(trail: MutableList<TrailPoint>, point: TrailPoint) {
+    val previous = trail.lastOrNull()
+    if (previous == null || point.monotonicNanos - previous.monotonicNanos >= 1_000_000_000L ||
+        point.toLocalMetres(previous).let { max(abs(it.x), abs(it.y)) } >= 0.25) {
+        trail += point
+        while (trail.size > 180) trail.removeAt(0)
+    }
+}
+
+private fun TrailPoint.toLocalMetres(origin: TrailPoint): Vec3 {
+    val north = (latitudeDeg - origin.latitudeDeg) * 111_132.0
+    val east = (longitudeDeg - origin.longitudeDeg) * 111_320.0 * cos(Math.toRadians(origin.latitudeDeg))
+    return Vec3(north, east, 0.0)
+}
+
+private fun niceMapSpan(required: Double): Double = listOf(10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0)
+    .firstOrNull { it >= required } ?: required
 
 private data class Metric(val label: String, val value: String, val unit: String)
 
@@ -298,6 +520,16 @@ internal fun RawDataScreen(state: InsUiState) {
                 Metric("Vertical accuracy", gnss?.verticalAccuracyM?.f(1) ?: "—", "m (68%)"),
                 Metric("Satellites used", gnss?.satellitesUsed?.toString() ?: "—", "SV"),
                 Metric("Fix status", state.solution.fixStatus.name, "status"),
+                Metric(
+                    "INS aiding",
+                    when {
+                        state.solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> "REJECTED"
+                        state.solution.qualityFlags and QualityFlag.STATIONARY_CONSTRAINT != 0 -> "STATIONARY HOLD"
+                        state.solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0 -> "APPLIED"
+                        else -> "NOT APPLIED"
+                    },
+                    "filter update",
+                ),
             ))
         }
         item {
@@ -440,6 +672,7 @@ internal fun SessionsScreen(state: InsUiState, sendAction: (String, Map<String, 
         KeyValueRow("Android accessory", if (state.aoaConnected) "Connected" else "Not connected")
         KeyValueRow("Protocol", "INS1 · 224-byte binary · CRC-32")
         KeyValueRow("Mounting", "Screen up · top edge forward")
+        KeyValueRow("App version", BuildConfig.VERSION_NAME)
     }
 }
 

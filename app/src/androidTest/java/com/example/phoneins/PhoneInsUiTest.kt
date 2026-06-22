@@ -15,6 +15,10 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import com.example.phoneins.data.InsRepository
+import com.example.phoneins.navigation.FixStatus
+import com.example.phoneins.navigation.GnssFix
+import com.example.phoneins.navigation.QualityFlag
+import com.example.phoneins.navigation.Vec3
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -78,5 +82,97 @@ class PhoneInsUiTest {
             InsRepository.update { it.copy(serviceRunning = false, simulated = false) }
         }
         composeRule.onNodeWithText("STOPPED").assertIsDisplayed()
+    }
+
+    @Test
+    fun dashboardContainsInsAndRawGnssPositionMap() {
+        composeRule.onNodeWithTag("position_map").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Local map comparing INS and raw GNSS positions from the initialization origin").fetchSemanticsNode()
+        composeRule.onNodeWithText("INS position").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Raw GNSS").assertIsDisplayed()
+    }
+
+    @Test
+    fun aidedDashboardQuantifiesInsGnssSeparationAndBound() {
+        val now = 10_000_000_000L
+        val gnss = GnssFix(
+            now - 100_000_000L,
+            1_750_000_000_000L,
+            1.3521,
+            103.8198,
+            25.0,
+            Vec3.ZERO,
+            2.5,
+            4.0,
+            0.2,
+            180.0,
+            12,
+        )
+        composeRule.runOnIdle {
+            InsRepository.update { state ->
+                state.copy(
+                    solution = state.solution.copy(
+                        monotonicNanos = now,
+                        latitudeDeg = 1.35211,
+                        longitudeDeg = 103.81981,
+                        altitudeEllipsoidM = 25.2,
+                        latestGnss = gnss,
+                        fixStatus = FixStatus.FIX_3D,
+                        qualityFlags = QualityFlag.INITIALIZED or QualityFlag.GNSS_FRESH or QualityFlag.GNSS_POSITION_VALID,
+                    ),
+                )
+            }
+        }
+        composeRule.onNodeWithTag("position_separation").assertIsDisplayed()
+        composeRule.onNodeWithText("GNSS bound active · within 7.5 m").assertIsDisplayed()
+    }
+
+    @Test
+    fun positionMapOriginStaysAtInitializationLocationWhileInsMoves() {
+        val now = 20_000_000_000L
+        composeRule.runOnIdle {
+            InsRepository.update { state ->
+                state.copy(
+                    solution = state.solution.copy(
+                        monotonicNanos = now,
+                        sequence = 10,
+                        latitudeDeg = 1.3521,
+                        longitudeDeg = 103.8198,
+                        altitudeEllipsoidM = 25.0,
+                        fixStatus = FixStatus.FIX_3D,
+                        qualityFlags = QualityFlag.INITIALIZED or QualityFlag.GNSS_POSITION_VALID,
+                    ),
+                )
+            }
+        }
+        composeRule.onNodeWithText("Origin 1.3521000, 103.8198000").performScrollTo().assertIsDisplayed()
+        composeRule.runOnIdle {
+            InsRepository.update { state ->
+                state.copy(
+                    solution = state.solution.copy(
+                        monotonicNanos = now + 1_000_000_000L,
+                        sequence = 110,
+                        latitudeDeg = 1.3522,
+                        longitudeDeg = 103.8199,
+                    ),
+                )
+            }
+        }
+        composeRule.onNodeWithText("Origin 1.3521000, 103.8198000").assertIsDisplayed()
+    }
+
+    @Test
+    fun rejectedGnssUpdateIsNotDescribedAsAided() {
+        composeRule.runOnIdle {
+            InsRepository.update { state ->
+                state.copy(
+                    solution = state.solution.copy(
+                        fixStatus = FixStatus.FIX_3D,
+                        qualityFlags = QualityFlag.INITIALIZED or QualityFlag.GNSS_FRESH or QualityFlag.GNSS_UPDATE_REJECTED,
+                    ),
+                )
+            }
+        }
+        composeRule.onNodeWithText("GNSS fix present · aiding rejected").assertIsDisplayed()
     }
 }

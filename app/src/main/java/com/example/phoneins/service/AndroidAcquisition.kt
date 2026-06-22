@@ -83,9 +83,12 @@ class AndroidAcquisition(
             while (altitudeHistory.size > 5) altitudeHistory.removeFirst()
         }
         val speed = if (location.hasSpeed()) location.speed.toDouble() else 0.0
-        val bearing = Math.toRadians(if (location.hasBearing()) location.bearing.toDouble() else 0.0)
-        val north = speed * cos(bearing)
-        val east = speed * sin(bearing)
+        val speedAccuracy = if (location.hasSpeedAccuracy()) location.speedAccuracyMetersPerSecond.toDouble() else Double.NaN
+        val directionKnown = location.hasBearing()
+        val stationarySpeed = location.hasSpeed() && speed <= 0.5 && (!speedAccuracy.isFinite() || speedAccuracy <= 1.5)
+        val bearing = Math.toRadians(if (directionKnown) location.bearing.toDouble() else 0.0)
+        val north = if (directionKnown) speed * cos(bearing) else 0.0
+        val east = if (directionKnown) speed * sin(bearing) else 0.0
         val down = if (altitudeHistory.size >= 3) {
             val first = altitudeHistory.first()
             val last = altitudeHistory.last()
@@ -101,11 +104,13 @@ class AndroidAcquisition(
                 velocityNedMps = Vec3(north, east, down),
                 horizontalAccuracyM = location.accuracy.toDouble(),
                 verticalAccuracyM = if (location.hasVerticalAccuracy()) location.verticalAccuracyMeters.toDouble() else Double.NaN,
-                speedAccuracyMps = if (location.hasSpeedAccuracy()) location.speedAccuracyMetersPerSecond.toDouble() else Double.NaN,
+                speedAccuracyMps = speedAccuracy,
                 bearingAccuracyDeg = if (location.hasBearingAccuracy()) location.bearingAccuracyDegrees.toDouble() else Double.NaN,
                 satellitesUsed = satellitesUsed,
                 hasAltitude = location.hasAltitude(),
-                hasHorizontalVelocity = location.hasSpeed() && location.hasBearing(),
+                // Bearing is undefined at rest, but a reliable near-zero speed is still a valid
+                // zero-velocity observation and must be allowed to bound the INS.
+                hasHorizontalVelocity = location.hasSpeed() && (directionKnown || stationarySpeed),
                 hasDerivedDownVelocity = down.isFinite(),
                 isMock = location.isMock,
             ),

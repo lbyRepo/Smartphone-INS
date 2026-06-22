@@ -72,6 +72,8 @@ object QualityFlag {
     const val OUTPUT_OVERRUN = 1 shl 11
     const val MOCK_GNSS = 1 shl 12
     const val MAGNETOMETER_INITIALIZATION = 1 shl 13
+    const val STATIONARY_CONSTRAINT = 1 shl 14
+    const val GNSS_UPDATE_REJECTED = 1 shl 15
 }
 
 data class NavigationSolution(

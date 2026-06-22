@@ -68,6 +68,8 @@ The final four bytes are the unsigned IEEE CRC-32 of the preceding 220 bytes. `p
 | 11 | Output overrun |
 | 12 | Mock GNSS |
 | 13 | Magnetometer used during initialization |
+| 14 | Stationary zero-velocity/position constraint active |
+| 15 | Most recent fresh GNSS correction rejected |
 
 ## Golden frame
 

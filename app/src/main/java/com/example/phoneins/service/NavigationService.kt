@@ -19,6 +19,8 @@ import com.example.phoneins.protocol.InsProtocol
 import com.example.phoneins.protocol.TcpInsServer
 import kotlinx.coroutines.*
 import java.util.ArrayDeque
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
@@ -32,6 +34,8 @@ class NavigationService : Service() {
     private var simulator: DeterministicSimulator? = null
     private var simulated = false
     private var publisherJob: Job? = null
+    private lateinit var publisherDispatcher: ExecutorCoroutineDispatcher
+    private val uiUpdatePending = AtomicBoolean(false)
     private var autoRequestedNanos: Long? = null
     @Volatile private var latestGnss: GnssFix? = null
     @Volatile private var latestMag: MagSample? = null
@@ -55,6 +59,9 @@ class NavigationService : Service() {
         tcp = TcpInsServer()
         aoa = AoaFrameTransport(this)
         recorder = SessionRecorder(this)
+        publisherDispatcher = Executors.newSingleThreadExecutor { task ->
+            Thread(task, "ins-100hz-publisher").apply { priority = Thread.MAX_PRIORITY }
+        }.asCoroutineDispatcher()
         tcp.start(); aoa.start()
         simulated = Build.FINGERPRINT.contains("generic", ignoreCase = true) || Build.MODEL.contains("sdk", ignoreCase = true)
         InsRepository.update { it.copy(serviceRunning = true, simulated = simulated, statusMessage = "Service running · initialize to begin", sessionNames = recorder.sessions()) }
@@ -104,6 +111,7 @@ class NavigationService : Service() {
 
     override fun onDestroy() {
         publisherJob?.cancel()
+        if (::publisherDispatcher.isInitialized) publisherDispatcher.close()
         stopSource()
         recorder.stop()
         tcp.close(); aoa.close()
@@ -151,13 +159,14 @@ class NavigationService : Service() {
     }
 
     private fun startPublisher() {
-        publisherJob = scope.launch {
+        publisherJob = scope.launch(publisherDispatcher) {
+            Process.setThreadPriority(-2)
             var target = SystemClock.elapsedRealtimeNanos()
             var lastRateTime = target
-            var rateFrames = 0L
             var lastImuCount = 0L
             var outputRate = 0.0
             var imuRate = 0.0
+            val outputTimes = ArrayDeque<Long>()
             while (isActive) {
                 target += OUTPUT_PERIOD_NANOS
                 val now = SystemClock.elapsedRealtimeNanos()
@@ -171,35 +180,49 @@ class NavigationService : Service() {
                 val solution = engine.snapshot(target, System.currentTimeMillis())
                 val frame = InsProtocol.encode(solution)
                 tcp.offer(frame); aoa.offer(frame); recorder.append(frame)
-                packetCounter++; rateFrames++
+                packetCounter++
                 val rateNow = SystemClock.elapsedRealtimeNanos()
+                outputTimes.addLast(rateNow)
+                while (outputTimes.size > 2 && rateNow - outputTimes.first() > OUTPUT_RATE_WINDOW_NANOS) {
+                    outputTimes.removeFirst()
+                }
                 if (rateNow - lastRateTime >= 1_000_000_000L) {
                     val seconds = (rateNow - lastRateTime) * 1e-9
-                    outputRate = rateFrames / seconds
+                    val rateDuration = (outputTimes.last() - outputTimes.first()) * 1e-9
+                    outputRate = if (rateDuration > 0.0) (outputTimes.size - 1) / rateDuration else 0.0
                     val currentImu = imuCounter.get()
                     imuRate = (currentImu - lastImuCount) / seconds
                     lastImuCount = currentImu
-                    rateFrames = 0
                     lastRateTime = rateNow
                     recorder.flush()
                 }
                 if (packetCounter % 10L == 0L) {
                     val drops = tcp.dropped + aoa.dropped
-                    InsRepository.update {
-                        it.copy(
-                            solution = solution,
-                            latestMag = latestMag,
-                            tcpConnected = tcp.connected,
-                            aoaConnected = aoa.connected,
-                            recording = recorder.recording,
-                            outputRateHz = outputRate,
-                            imuRateHz = imuRate,
-                            packetsSent = packetCounter,
-                            droppedPackets = drops,
-                            statusMessage = solutionStatus(solution),
-                        )
+                    val publishedPackets = packetCounter
+                    val publishedOutputRate = outputRate
+                    val publishedImuRate = imuRate
+                    if (uiUpdatePending.compareAndSet(false, true)) scope.launch {
+                        try {
+                            val status = solutionStatus(solution)
+                            InsRepository.update {
+                                it.copy(
+                                    solution = solution,
+                                    latestMag = latestMag,
+                                    tcpConnected = tcp.connected,
+                                    aoaConnected = aoa.connected,
+                                    recording = recorder.recording,
+                                    outputRateHz = publishedOutputRate,
+                                    imuRateHz = publishedImuRate,
+                                    packetsSent = publishedPackets,
+                                    droppedPackets = drops,
+                                    statusMessage = status,
+                                )
+                            }
+                            if (publishedPackets % 100L == 0L) updateNotification(status)
+                        } finally {
+                            uiUpdatePending.set(false)
+                        }
                     }
-                    updateNotification(solutionStatus(solution))
                 }
                 val remaining = target - SystemClock.elapsedRealtimeNanos()
                 engine.markOutputOverrun(remaining < -OUTPUT_PERIOD_NANOS)
@@ -215,6 +238,8 @@ class NavigationService : Service() {
         if (now - requested < 3_000_000_000L) return
         val samples = synchronized(stationaryImu) { stationaryImu.toList().takeLast(300) }
         val gnss = latestGnss ?: return updateWaiting("Waiting for a valid GNSS fix")
+        if (!gnss.hasAltitude || !gnss.altitudeEllipsoidM.isFinite()) return updateWaiting("Waiting for a valid 3D GNSS fix")
+        if (!gnss.horizontalAccuracyM.isFinite() || gnss.horizontalAccuracyM > 100.0) return updateWaiting("Waiting for an accurate GNSS fix")
         val mag = latestMag ?: return updateWaiting("Waiting for magnetometer")
         if (samples.size < 200) return updateWaiting("Collecting stationary IMU samples · ${samples.size}/200")
         val meanAcceleration = samples.map { it.accelerationMps2 }.averageVec()
@@ -282,8 +307,11 @@ class NavigationService : Service() {
     private fun solutionStatus(solution: NavigationSolution) = when {
         !solution.initialized -> if (autoRequestedNanos != null) InsRepository.state.value.statusMessage else "Running · awaiting initialization"
         solution.degraded -> "Dead reckoning · GNSS stale"
+        solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> "GNSS fix present · correction rejected"
+        solution.qualityFlags and QualityFlag.STATIONARY_CONSTRAINT != 0 -> "GNSS valid · stationary hold"
         solution.qualityFlags and QualityFlag.HEADING_COURSE_AIDED != 0 -> "GNSS valid · course-aided heading"
-        else -> "GNSS valid · heading coasting"
+        solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0 -> "GNSS valid · position aided · heading coasting"
+        else -> "GNSS fix present · awaiting correction"
     }
 
     private fun List<Vec3>.averageVec(): Vec3 {
@@ -321,5 +349,6 @@ class NavigationService : Service() {
         private const val CHANNEL_ID = "ins_navigation"
         private const val NOTIFICATION_ID = 1001
         private const val OUTPUT_PERIOD_NANOS = 10_000_000L
+        private const val OUTPUT_RATE_WINDOW_NANOS = 5_000_000_000L
     }
 }

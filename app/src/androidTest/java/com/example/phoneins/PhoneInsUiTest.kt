@@ -22,6 +22,7 @@ import com.example.phoneins.data.InsRepository
 import com.example.phoneins.navigation.FixStatus
 import com.example.phoneins.navigation.DecimeterRouteScenario
 import com.example.phoneins.navigation.GnssFix
+import com.example.phoneins.navigation.InitSource
 import com.example.phoneins.navigation.ManualInitialization
 import com.example.phoneins.navigation.MotionProfile
 import com.example.phoneins.navigation.NavigationEngine
@@ -103,6 +104,44 @@ class PhoneInsUiTest {
         composeRule.onNodeWithContentDescription("Position map with 0 INS history points and 0 raw GNSS history points").fetchSemanticsNode()
         composeRule.onNodeWithText("INS position").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Raw GNSS").assertIsDisplayed()
+    }
+
+    @Test
+    fun dashboardShowsInitializationCompletionState() {
+        composeRule.onNodeWithTag("initialization_status").assertIsDisplayed()
+        composeRule.onNodeWithText("Initialization not completed").assertIsDisplayed()
+
+        composeRule.runOnIdle {
+            InsRepository.update {
+                it.copy(
+                    serviceRunning = true,
+                    initializationInProgress = true,
+                    initializationProgress = 0.5f,
+                    initializationElapsedSeconds = 7.5,
+                    coarseRollDeg = 1.2,
+                    coarsePitchDeg = -2.3,
+                    statusMessage = "Initializing · 7.5/15.0 s · keep still",
+                )
+            }
+        }
+        composeRule.onNodeWithText("Initialization in progress").assertIsDisplayed()
+        composeRule.onNodeWithTag("initialization_progress_text").assertIsDisplayed()
+        composeRule.onNodeWithTag("coarse_alignment").assertIsDisplayed()
+
+        composeRule.runOnIdle {
+            InsRepository.update { state ->
+                state.copy(
+                    initializationInProgress = false,
+                    solution = state.solution.copy(
+                        initializationSource = InitSource.MANUAL,
+                        qualityFlags = QualityFlag.INITIALIZED,
+                    ),
+                    statusMessage = "Manual pose initialized · zero velocity",
+                )
+            }
+        }
+        composeRule.onNodeWithText("Initialization complete").assertIsDisplayed()
+        composeRule.onNodeWithText("Manual initialization applied · INS output is active").assertIsDisplayed()
     }
 
     @Test

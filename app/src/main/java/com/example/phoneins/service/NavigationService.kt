@@ -19,6 +19,7 @@ import com.example.phoneins.protocol.InsProtocol
 import com.example.phoneins.protocol.TcpInsServer
 import kotlinx.coroutines.*
 import java.util.ArrayDeque
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -30,6 +31,7 @@ class NavigationService : Service() {
     private lateinit var tcp: TcpInsServer
     private lateinit var aoa: AoaFrameTransport
     private lateinit var recorder: SessionRecorder
+    private lateinit var csvLogger: CsvTrialLogger
     private var acquisition: AndroidAcquisition? = null
     private var simulator: DeterministicSimulator? = null
     private var simulated = false
@@ -60,12 +62,24 @@ class NavigationService : Service() {
         tcp = TcpInsServer()
         aoa = AoaFrameTransport(this)
         recorder = SessionRecorder(this)
+        csvLogger = CsvTrialLogger(this)
         publisherDispatcher = Executors.newSingleThreadExecutor { task ->
             Thread(task, "ins-100hz-publisher").apply { priority = Thread.MAX_PRIORITY }
         }.asCoroutineDispatcher()
         tcp.start(); aoa.start()
+        val csvFile = csvLogger.start()
         simulated = Build.FINGERPRINT.contains("generic", ignoreCase = true) || Build.MODEL.contains("sdk", ignoreCase = true)
-        InsRepository.update { it.copy(serviceRunning = true, simulated = simulated, statusMessage = "Service running · initialize to begin", sessionNames = recorder.sessions()) }
+        InsRepository.update {
+            it.copy(
+                serviceRunning = true,
+                simulated = simulated,
+                csvLoggingEnabled = csvLogger.logging,
+                csvLogFileName = csvFile.name,
+                csvLogPath = csvFile.absolutePath,
+                statusMessage = "Service running · CSV logging enabled · initialize to begin",
+                sessionNames = recorder.sessions(),
+            )
+        }
         startSource()
         startPublisher()
     }
@@ -76,14 +90,33 @@ class NavigationService : Service() {
             ACTION_STOP -> { stopSelf(); return START_NOT_STICKY }
             ACTION_INITIALIZE_AUTO -> {
                 autoRequestedNanos = SystemClock.elapsedRealtimeNanos()
-                InsRepository.update { it.copy(statusMessage = "Keep phone still · collecting bias and heading") }
+                InsRepository.update {
+                    it.copy(
+                        initializationInProgress = true,
+                        initializationProgress = 0f,
+                        initializationElapsedSeconds = 0.0,
+                        initializationDurationSeconds = AUTO_INITIALIZATION_DURATION_NANOS * 1e-9,
+                        coarseRollDeg = Double.NaN,
+                        coarsePitchDeg = Double.NaN,
+                        statusMessage = "Initializing · keep still for 15 s · gravity aligning roll/pitch",
+                    )
+                }
                 tryAutomaticInitialization()
             }
             ACTION_INITIALIZE_MANUAL -> initializeManual(command)
             ACTION_RESET -> {
                 engine.reset(InsRepository.state.value.solution.motionProfile)
                 autoRequestedNanos = null
-                InsRepository.update { it.copy(statusMessage = "Filter reset · choose initialization") }
+                InsRepository.update {
+                    it.copy(
+                        initializationInProgress = false,
+                        initializationProgress = 0f,
+                        initializationElapsedSeconds = 0.0,
+                        coarseRollDeg = Double.NaN,
+                        coarsePitchDeg = Double.NaN,
+                        statusMessage = "Filter reset · choose initialization",
+                    )
+                }
             }
             ACTION_PROFILE -> {
                 val profile = runCatching { MotionProfile.valueOf(command.getStringExtra("profile") ?: "VEHICLE") }.getOrDefault(MotionProfile.VEHICLE)
@@ -94,8 +127,18 @@ class NavigationService : Service() {
                 val enabled = command.getBooleanExtra("enabled", false)
                 if (enabled != simulated) {
                     simulated = enabled
-                    stopSource(); engine.reset(); stationaryImu.clear(); latestGnss = null; latestMag = null; startSource()
-                    InsRepository.update { it.copy(simulated = simulated, statusMessage = if (simulated) "Simulator ready · initialize to begin" else "Live sensors ready · initialize to begin") }
+                    stopSource(); engine.reset(); stationaryImu.clear(); latestGnss = null; latestMag = null; autoRequestedNanos = null; startSource()
+                    InsRepository.update {
+                        it.copy(
+                            simulated = simulated,
+                            initializationInProgress = false,
+                            initializationProgress = 0f,
+                            initializationElapsedSeconds = 0.0,
+                            coarseRollDeg = Double.NaN,
+                            coarsePitchDeg = Double.NaN,
+                            statusMessage = if (simulated) "Simulator ready · initialize to begin" else "Live sensors ready · initialize to begin",
+                        )
+                    }
                 }
             }
             ACTION_RECORDING -> {
@@ -115,10 +158,22 @@ class NavigationService : Service() {
         if (::publisherDispatcher.isInitialized) publisherDispatcher.close()
         stopSource()
         recorder.stop()
+        if (::csvLogger.isInitialized) csvLogger.stop()
         tcp.close(); aoa.close()
         wakeLock?.let { if (it.isHeld) it.release() }
         scope.cancel()
-        InsRepository.update { it.copy(serviceRunning = false, tcpConnected = false, aoaConnected = false, recording = false, statusMessage = "Stopped") }
+        InsRepository.update {
+            it.copy(
+                serviceRunning = false,
+                tcpConnected = false,
+                aoaConnected = false,
+                recording = false,
+                csvLoggingEnabled = false,
+                initializationInProgress = false,
+                initializationProgress = 0f,
+                statusMessage = "Stopped",
+            )
+        }
         super.onDestroy()
     }
 
@@ -143,7 +198,12 @@ class NavigationService : Service() {
     private fun acceptImu(sample: TimedImuSample) {
         synchronized(stationaryImu) {
             stationaryImu.addLast(sample)
-            while (stationaryImu.size > 600) stationaryImu.removeFirst()
+            while (stationaryImu.isNotEmpty() &&
+                sample.monotonicNanos - stationaryImu.first().monotonicNanos > AUTO_INITIALIZATION_SAMPLE_BUFFER_NANOS
+            ) {
+                stationaryImu.removeFirst()
+            }
+            while (stationaryImu.size > AUTO_INITIALIZATION_MAX_BUFFER_SAMPLES) stationaryImu.removeFirst()
         }
         imuCounter.incrementAndGet()
         engine.processImu(sample)
@@ -181,6 +241,7 @@ class NavigationService : Service() {
                 val solution = engine.snapshot(replayClockNanos ?: target, System.currentTimeMillis())
                 val frame = InsProtocol.encode(solution)
                 tcp.offer(frame); aoa.offer(frame); recorder.append(frame)
+                csvLogger.append(solution)
                 packetCounter++
                 val rateNow = SystemClock.elapsedRealtimeNanos()
                 outputTimes.addLast(rateNow)
@@ -196,6 +257,7 @@ class NavigationService : Service() {
                     lastImuCount = currentImu
                     lastRateTime = rateNow
                     recorder.flush()
+                    csvLogger.flush()
                 }
                 if (packetCounter % 10L == 0L) {
                     val drops = tcp.dropped + aoa.dropped
@@ -212,6 +274,9 @@ class NavigationService : Service() {
                                     tcpConnected = tcp.connected,
                                     aoaConnected = aoa.connected,
                                     recording = recorder.recording,
+                                    csvLoggingEnabled = csvLogger.logging,
+                                    csvLogFileName = csvLogger.currentFile?.name,
+                                    csvLogPath = csvLogger.currentFile?.absolutePath,
                                     outputRateHz = publishedOutputRate,
                                     imuRateHz = publishedImuRate,
                                     packetsSent = publishedPackets,
@@ -236,25 +301,67 @@ class NavigationService : Service() {
     private fun tryAutomaticInitialization() {
         val requested = autoRequestedNanos ?: return
         val now = SystemClock.elapsedRealtimeNanos()
-        if (now - requested < 3_000_000_000L) return
-        val samples = synchronized(stationaryImu) { stationaryImu.toList().takeLast(300) }
-        val gnss = latestGnss ?: return updateWaiting("Waiting for a valid GNSS fix")
-        if (!gnss.hasAltitude || !gnss.altitudeEllipsoidM.isFinite()) return updateWaiting("Waiting for a valid 3D GNSS fix")
-        if (!gnss.horizontalAccuracyM.isFinite() || gnss.horizontalAccuracyM > 100.0) return updateWaiting("Waiting for an accurate GNSS fix")
-        val mag = latestMag ?: return updateWaiting("Waiting for magnetometer")
-        if (samples.size < 200) return updateWaiting("Collecting stationary IMU samples · ${samples.size}/200")
+        val elapsedNanos = (now - requested).coerceAtLeast(0L)
+        val elapsedSeconds = elapsedNanos * 1e-9
+        val progress = (elapsedNanos.toDouble() / AUTO_INITIALIZATION_DURATION_NANOS).coerceIn(0.0, 1.0)
+        val samples = synchronized(stationaryImu) { stationaryImu.filter { it.monotonicNanos >= requested } }
+        val coarseMeanAcceleration = samples.takeIf { it.isNotEmpty() }?.map { it.accelerationMps2 }?.averageVec()
+        val coarse = coarseMeanAcceleration?.let(::gravityRollPitchDeg)
+        val gnss = latestGnss
+        val mag = latestMag
+        val readiness = when {
+            samples.size < MIN_AUTO_INITIALIZATION_IMU_SAMPLES && progress >= 1.0 ->
+                "waiting for IMU samples (${samples.size}/$MIN_AUTO_INITIALIZATION_IMU_SAMPLES)"
+            gnss == null -> "waiting for valid GNSS"
+            !gnss.hasAltitude || !gnss.altitudeEllipsoidM.isFinite() -> "waiting for valid 3D GNSS"
+            !gnss.horizontalAccuracyM.isFinite() || gnss.horizontalAccuracyM > 100.0 -> "waiting for accurate GNSS"
+            mag == null -> "waiting for magnetometer"
+            else -> "gravity roll/pitch alignment active"
+        }
+        val progressMessage = automaticInitializationMessage(elapsedSeconds, readiness, coarse)
+        updateInitializationProgress(progressMessage, progress, elapsedSeconds, coarse)
+        if (elapsedNanos < AUTO_INITIALIZATION_DURATION_NANOS) return
+        if (samples.size < MIN_AUTO_INITIALIZATION_IMU_SAMPLES) return
+        if (gnss == null) return
+        if (!gnss.hasAltitude || !gnss.altitudeEllipsoidM.isFinite()) return
+        if (!gnss.horizontalAccuracyM.isFinite() || gnss.horizontalAccuracyM > 100.0) return
+        if (mag == null) return
         val meanAcceleration = samples.map { it.accelerationMps2 }.averageVec()
         val meanAngularRate = samples.map { it.angularRateRadps }.averageVec()
-        val stable = abs(meanAcceleration.norm() - 9.80665) < 0.6 && meanAngularRate.norm() < 0.08
+        val stable = abs(meanAcceleration.norm() - STANDARD_GRAVITY) < 0.6 && meanAngularRate.norm() < 0.08
         val magneticValid = mag.fieldMicroTesla.norm() in 15.0..100.0
-        if (!stable) return updateWaiting("Motion detected · keep the phone still")
-        if (!magneticValid) return updateWaiting("Magnetic field is inconsistent · use manual initialization")
+        if (!stable) {
+            autoRequestedNanos = now
+            return updateInitializationProgress(
+                "Motion detected · restarting 15 s initialization · keep phone still",
+                0.0,
+                0.0,
+                coarse,
+            )
+        }
+        if (!magneticValid) return updateInitializationProgress(
+            "Magnetic field is inconsistent · use manual initialization",
+            1.0,
+            elapsedSeconds,
+            coarse,
+        )
         val declination = GeomagneticField(
             gnss.latitudeDeg.toFloat(), gnss.longitudeDeg.toFloat(), gnss.altitudeEllipsoidM.toFloat(), gnss.unixMillis,
         ).declination.toDouble()
         engine.initializeAutomatic(gnss, meanAcceleration, meanAngularRate, mag.fieldMicroTesla, declination)
         autoRequestedNanos = null
-        InsRepository.update { it.copy(statusMessage = "Initialized · magnetometer now locked out") }
+        val completedCoarse = gravityRollPitchDeg(meanAcceleration)
+        InsRepository.update {
+            it.copy(
+                initializationInProgress = false,
+                initializationProgress = 1f,
+                initializationElapsedSeconds = AUTO_INITIALIZATION_DURATION_NANOS * 1e-9,
+                initializationDurationSeconds = AUTO_INITIALIZATION_DURATION_NANOS * 1e-9,
+                coarseRollDeg = completedCoarse.first,
+                coarsePitchDeg = completedCoarse.second,
+                statusMessage = "Initialized · gravity roll/pitch aligned · magnetometer now locked out",
+            )
+        }
     }
 
     private fun initializeManual(intent: Intent) {
@@ -267,7 +374,19 @@ class NavigationService : Service() {
         val acceleration = if (samples.isEmpty()) Vec3(0.0, 0.0, -9.80665) else samples.map { it.accelerationMps2 }.averageVec()
         val angularRate = if (samples.isEmpty()) Vec3.ZERO else samples.map { it.angularRateRadps }.averageVec()
         runCatching { engine.initializeManual(request, acceleration, angularRate) }
-            .onSuccess { autoRequestedNanos = null; InsRepository.update { it.copy(statusMessage = "Manual pose initialized · zero velocity") } }
+            .onSuccess {
+                autoRequestedNanos = null
+                InsRepository.update {
+                    it.copy(
+                        initializationInProgress = false,
+                        initializationProgress = 1f,
+                        initializationElapsedSeconds = 0.0,
+                        coarseRollDeg = Double.NaN,
+                        coarsePitchDeg = Double.NaN,
+                        statusMessage = "Manual pose initialized · zero velocity",
+                    )
+                }
+            }
             .onFailure { error -> InsRepository.update { it.copy(statusMessage = error.message ?: "Invalid manual initialization") } }
     }
 
@@ -288,7 +407,19 @@ class NavigationService : Service() {
             engine.reset(MotionProfile.VEHICLE)
             stationaryImu.clear()
             replayClockNanos = null
-            InsRepository.update { it.copy(simulated = true, replaying = true, statusMessage = "Replaying public Pixel 4 sensor data") }
+            autoRequestedNanos = null
+            InsRepository.update {
+                it.copy(
+                    simulated = true,
+                    replaying = true,
+                    initializationInProgress = false,
+                    initializationProgress = 0f,
+                    initializationElapsedSeconds = 0.0,
+                    coarseRollDeg = Double.NaN,
+                    coarsePitchDeg = Double.NaN,
+                    statusMessage = "Replaying public Pixel 4 sensor data",
+                )
+            }
             runCatching {
                 GoogleDatasetReplay(this@NavigationService).run(
                     initialize = { engine.initializeManual(it) },
@@ -308,7 +439,43 @@ class NavigationService : Service() {
         }
     }
 
-    private fun updateWaiting(message: String) { InsRepository.update { it.copy(statusMessage = message) } }
+    private fun updateInitializationProgress(
+        message: String,
+        progress: Double,
+        elapsedSeconds: Double,
+        coarseRollPitchDeg: Pair<Double, Double>?,
+    ) {
+        InsRepository.update {
+            it.copy(
+                initializationInProgress = autoRequestedNanos != null,
+                initializationProgress = progress.toFloat(),
+                initializationElapsedSeconds = elapsedSeconds.coerceAtLeast(0.0),
+                initializationDurationSeconds = AUTO_INITIALIZATION_DURATION_NANOS * 1e-9,
+                coarseRollDeg = coarseRollPitchDeg?.first ?: Double.NaN,
+                coarsePitchDeg = coarseRollPitchDeg?.second ?: Double.NaN,
+                statusMessage = message,
+            )
+        }
+    }
+
+    private fun automaticInitializationMessage(
+        elapsedSeconds: Double,
+        readiness: String,
+        coarseRollPitchDeg: Pair<Double, Double>?,
+    ): String {
+        val elapsed = elapsedSeconds.coerceIn(0.0, AUTO_INITIALIZATION_DURATION_NANOS * 1e-9)
+        val coarse = coarseRollPitchDeg?.let {
+            " · coarse R/P ${String.format(Locale.US, "%.1f", it.first)}°/${String.format(Locale.US, "%.1f", it.second)}°"
+        }.orEmpty()
+        return "Initializing · ${String.format(Locale.US, "%.1f", elapsed)}/15.0 s · keep still · $readiness$coarse"
+    }
+
+    private fun gravityRollPitchDeg(acceleration: Vec3): Pair<Double, Double> {
+        val g = acceleration.norm().coerceAtLeast(1e-6)
+        val pitch = kotlin.math.asin((acceleration.x / g).coerceIn(-1.0, 1.0))
+        val roll = kotlin.math.atan2(-acceleration.y, -acceleration.z)
+        return Math.toDegrees(roll) to Math.toDegrees(pitch)
+    }
 
     private fun solutionStatus(solution: NavigationSolution) = when {
         !solution.initialized -> if (autoRequestedNanos != null) InsRepository.state.value.statusMessage else "Running · awaiting initialization"
@@ -357,5 +524,10 @@ class NavigationService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val OUTPUT_PERIOD_NANOS = 10_000_000L
         private const val OUTPUT_RATE_WINDOW_NANOS = 5_000_000_000L
+        private const val STANDARD_GRAVITY = 9.80665
+        private const val AUTO_INITIALIZATION_DURATION_NANOS = 15_000_000_000L
+        private const val AUTO_INITIALIZATION_SAMPLE_BUFFER_NANOS = 20_000_000_000L
+        private const val AUTO_INITIALIZATION_MAX_BUFFER_SAMPLES = 5_000
+        private const val MIN_AUTO_INITIALIZATION_IMU_SAMPLES = 300
     }
 }

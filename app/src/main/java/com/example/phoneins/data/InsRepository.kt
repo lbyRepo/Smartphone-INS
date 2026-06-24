@@ -21,6 +21,15 @@ data class InsUiState(
     val droppedPackets: Long = 0,
     val statusMessage: String = "Stopped",
     val sessionNames: List<String> = emptyList(),
+    val csvLoggingEnabled: Boolean = false,
+    val csvLogFileName: String? = null,
+    val csvLogPath: String? = null,
+    val initializationInProgress: Boolean = false,
+    val initializationProgress: Float = 0f,
+    val initializationElapsedSeconds: Double = 0.0,
+    val initializationDurationSeconds: Double = 15.0,
+    val coarseRollDeg: Double = Double.NaN,
+    val coarsePitchDeg: Double = Double.NaN,
 )
 
 object InsRepository {

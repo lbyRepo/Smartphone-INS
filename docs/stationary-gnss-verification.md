@@ -1,4 +1,4 @@
-# Stationary GNSS aiding verification · version 0.2.1
+# Stationary GNSS aiding verification · version 0.3.2
 
 ## Defects corrected
 
@@ -7,7 +7,7 @@
 3. A statistically accepted update could have a small Kalman gain and leave the solution far outside the GNSS accuracy envelope. After an accepted update, version 0.2.0 bounds the true horizontal position and velocity vector magnitudes—not merely each axis—to three reported GNSS standard deviations.
 4. A large inertial error could cause valid GNSS measurements to be rejected indefinitely. Version 0.2.0 reacquires from consecutive mutually consistent fixes while retaining isolated-outlier rejection.
 5. The UI previously described every fresh fix as `GNSS-aided`. It now distinguishes `APPLIED`, `STATIONARY HOLD`, `REJECTED`, stale, and awaiting-correction states.
-6. GNSS position and zero-velocity updates previously coupled into the attitude error state strongly enough to rotate a stationary solution even though its position remained bounded. Version 0.2.1 latches attitude only while both IMU and GNSS independently indicate rest, continues learning gyro bias, isolates attitude from stationary position/ZUPT cross-coupling, and releases the latch immediately when either source detects movement.
+6. GNSS position and zero-velocity updates previously coupled into the attitude error state strongly enough to rotate a stationary solution even though its position remained bounded. Version 0.3.2 isolates attitude from GNSS position/velocity and stationary position/ZUPT cross-coupling, removes the fixed attitude latch, and lets roll/pitch follow gyro integration with gravity-based stabilization.
 
 ## Stationary regression
 
@@ -39,7 +39,8 @@ The generated numerical result is saved in `navigation/build/reports/stationary-
 - Consistent moving GNSS fixes reacquire both horizontal velocity components after a large velocity innovation.
 - Invalid or grossly inaccurate 3D fixes cannot claim aiding.
 - GNSS outage remains visibly flagged as dead reckoning.
-- The stationary attitude hold releases on movement and GNSS course aiding resumes.
+- Stationary phone Euler output changes when the phone is physically rolled or tilted.
+- GNSS course aiding resumes on movement without reintroducing magnetometer heading correction.
 
 ## Dashboard map
 

@@ -95,6 +95,8 @@ data class NavigationSolution(
     val fixStatus: FixStatus,
     val qualityFlags: Int,
     val sequence: Long = 0,
+    val accelerometerBiasMps2: Vec3 = Vec3.ZERO,
+    val gyroBiasRadps: Vec3 = Vec3.ZERO,
 ) {
     val initialized get() = qualityFlags and QualityFlag.INITIALIZED != 0
     val degraded get() = qualityFlags and QualityFlag.DEGRADED != 0

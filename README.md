@@ -2,7 +2,21 @@
 
 Android 13+ phone INS demonstrator with a 100 Hz binary output stream, WGS84/NED output, automatic or manual initialization, deterministic replay, explicit stationary constraints, and simulator-focused UI validation.
 
-Version 0.3.1 fixes a Dashboard rendering defect where history counters advanced but the Canvas kept displaying only a stationary marker. The map now hands immutable trail snapshots to an explicitly invalidated native plot surface, draws a solid INS history and dashed raw-GNSS history, fits the accumulated route, marks initialization/latest positions, and reports displacement from initialization. Its packaged Pixel 4 route replay still deliberately pauses GNSS aiding and reacquires it so divergence and correction remain visible.
+Version 0.3.4 adds default-on CSV trial logging for field evaluation. Every navigation-service run creates a dated file named like `phoneins_trial_YYYYMMDD_HHMMSS.csv` and logs one row per 100 Hz output tick with INS solution, bias estimates, raw IMU, and GNSS data. A MATLAB post-processing script is available at `tools/matlab/plot_phone_ins_log.m`.
+
+On Android devices, CSV logs are written under the app-specific Documents folder:
+
+```text
+/sdcard/Android/data/com.example.phoneins/files/Documents/trial_logs/
+```
+
+For example, retrieve logs with:
+
+```bash
+adb pull /sdcard/Android/data/com.example.phoneins/files/Documents/trial_logs/
+```
+
+Version 0.3.3 added a deliberate 15-second automatic initialization window. During that window, the app averages the gravity vector for coarse roll/pitch alignment, reports progress on the Dashboard, and clearly shows whether initialization is not completed, in progress, or complete. Magnetometer use remains limited to initial yaw, and moving heading is still corrected through GNSS course aiding.
 
 Open this folder in Android Studio Narwhal or build from the terminal:
 
@@ -27,6 +41,6 @@ sdkmanager --install "system-images;android-36;google_apis;arm64-v8a"
 
 Those tests start the real foreground service, replay the packaged 199-epoch Pixel 4 reference route, assert raw IMU/magnetometer/GNSS reach application state, exercise deliberate aiding suspension and reacquisition, and measure 500 production TCP frames for runtime rate, sequence continuity, CRC, and queue drops.
 
-Version 0.3.1 passes all 14 managed-device tests on the API 36 Medium Phone. The Android service delivered 500 consecutive frames at 100.606 Hz with zero sequence loss or queue drops. In addition to route/history assertions, a rendered-pixel regression requires a real multi-segment INS polyline, preventing a history counter or marker from masquerading as a working plot.
+Version 0.3.4 passes the navigation and protocol unit-test suite and builds the engineering APK. The previous 0.3.1 managed-device run passed all 14 API 36 Medium Phone tests, delivering 500 consecutive frames at 100.606 Hz with zero sequence loss or queue drops. In addition to route/history assertions, a rendered-pixel regression requires a real multi-segment INS polyline, preventing a history counter or marker from masquerading as a working plot.
 
-The stationary navigation regression runs 12,001 biased IMU samples at 100 Hz with 121 noisy valid 3D GNSS fixes at 1 Hz. It asserts bounded position and zero velocity plus less than 0.2° roll, pitch, and yaw change after settling. The separate Decimeter route report proves roll/pitch remain within 0.4°/0.2° while heading changes by more than 177°. Reports are generated under `navigation/build/reports`.
+The stationary navigation regression runs 12,001 biased IMU samples at 100 Hz with 121 noisy valid 3D GNSS fixes at 1 Hz. It asserts bounded position and zero velocity plus less than 0.2° roll, pitch, and yaw change after settling. A separate regression now verifies that a stationary phone's reported Euler roll and pitch change when the phone is physically rolled or tilted. The Decimeter route report uses a handheld-attitude acceptance band instead of requiring roll/pitch to remain frozen. Reports are generated under `navigation/build/reports`.

@@ -217,7 +217,48 @@ class NavigationEngineTest {
     }
 
     @Test
-    fun stationaryAttitudeHoldReleasesWhenMovementAndGnssCourseBegin() {
+    fun stationaryPhoneEulerTracksPhysicalRollAndPitchTilt() {
+        val latitude = 37.42358
+        val longitude = -122.09412
+        val start = 6_000_000_000L
+
+        val rollEngine = NavigationEngine()
+        rollEngine.initializeManual(ManualInitialization(latitude, longitude, 30.0, 0.0, 0.0, 0.0))
+        rollEngine.processImu(TimedImuSample(start, restingSpecificForceBody(0.0, 0.0), Vec3.ZERO))
+        val rollRate = Math.toRadians(30.0)
+        repeat(100) { index ->
+            val roll = rollRate * (index + 1) / 100.0
+            rollEngine.processImu(
+                TimedImuSample(
+                    start + (index + 1) * 10_000_000L,
+                    restingSpecificForceBody(roll, 0.0),
+                    Vec3(rollRate, 0.0, 0.0),
+                ),
+            )
+        }
+        val rolled = rollEngine.snapshot(start + 1_010_000_000L, 1_700_000_001_010L)
+        assertTrue(abs(rolled.eulerDeg.x) > 20.0, "Roll Euler angle stayed latched while the phone rolled: ${rolled.eulerDeg}")
+
+        val pitchEngine = NavigationEngine()
+        pitchEngine.initializeManual(ManualInitialization(latitude, longitude, 30.0, 0.0, 0.0, 0.0))
+        pitchEngine.processImu(TimedImuSample(start, restingSpecificForceBody(0.0, 0.0), Vec3.ZERO))
+        val pitchRate = Math.toRadians(25.0)
+        repeat(100) { index ->
+            val pitch = pitchRate * (index + 1) / 100.0
+            pitchEngine.processImu(
+                TimedImuSample(
+                    start + (index + 1) * 10_000_000L,
+                    restingSpecificForceBody(0.0, pitch),
+                    Vec3(0.0, pitchRate, 0.0),
+                ),
+            )
+        }
+        val pitched = pitchEngine.snapshot(start + 1_010_000_000L, 1_700_000_001_010L)
+        assertTrue(abs(pitched.eulerDeg.y) > 15.0, "Pitch Euler angle stayed latched while the phone tilted: ${pitched.eulerDeg}")
+    }
+
+    @Test
+    fun stationaryConstraintReleasesWhenMovementAndGnssCourseBegin() {
         val latitude = 37.42358
         val longitude = -122.09412
         val engine = NavigationEngine(MotionProfile.VEHICLE)
@@ -368,4 +409,10 @@ class NavigationEngineTest {
     }
 
     private fun angularDifferenceDeg(a: Double, b: Double): Double = abs((a - b + 540.0) % 360.0 - 180.0)
+
+    private fun restingSpecificForceBody(rollRad: Double, pitchRad: Double): Vec3 =
+        multiply3(
+            transpose3(bodyToNedMatrix(rollRad, pitchRad, 0.0)),
+            Vec3(0.0, 0.0, -9.80665),
+        )
 }

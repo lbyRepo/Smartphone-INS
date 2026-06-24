@@ -173,6 +173,9 @@ private fun DashboardScreen(state: InsUiState, positionMapState: PositionMapStat
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
+            InitializationStatusCard(state)
+        }
+        item {
             StatusBanner(solution)
         }
         item {
@@ -221,6 +224,80 @@ private fun DashboardScreen(state: InsUiState, positionMapState: PositionMapStat
                     Metric("Dropped", state.droppedPackets.toString(), "frames"),
                 ),
             )
+        }
+    }
+}
+
+@Composable
+private fun InitializationStatusCard(state: InsUiState) {
+    val solution = state.solution
+    val complete = solution.initialized
+    val inProgress = state.initializationInProgress && !complete
+    val title = when {
+        complete -> "Initialization complete"
+        inProgress -> "Initialization in progress"
+        else -> "Initialization not completed"
+    }
+    val detail = when {
+        complete -> {
+            val source = solution.initializationSource.name.lowercase().replaceFirstChar { it.titlecase() }
+            "$source initialization applied · INS output is active"
+        }
+        inProgress -> "Keep the phone still · collecting 15 s gravity/IMU alignment"
+        state.serviceRunning -> "Go to Init and choose automatic or manual initialization before using INS output"
+        else -> "Start the service, then initialize before using INS output"
+    }
+    val container = when {
+        complete -> MaterialTheme.colorScheme.primaryContainer
+        inProgress -> MaterialTheme.colorScheme.tertiaryContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = container),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("initialization_status")
+            .semantics { contentDescription = title },
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Surface(
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.70f),
+                    shape = MaterialTheme.shapes.small,
+                ) {
+                    Text(
+                        if (complete) "DONE" else "PENDING",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                }
+            }
+            Text(detail, fontSize = 14.sp)
+            if (inProgress) {
+                LinearProgressIndicator(
+                    progress = { state.initializationProgress.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 8.dp),
+                )
+                Text(
+                    "${state.initializationElapsedSeconds.coerceAtMost(state.initializationDurationSeconds).f(1)} / ${state.initializationDurationSeconds.f(1)} s",
+                    fontSize = 14.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.testTag("initialization_progress_text"),
+                )
+            }
+            if (state.coarseRollDeg.isFinite() && state.coarsePitchDeg.isFinite() && !complete) {
+                Text(
+                    "Coarse gravity roll/pitch ${state.coarseRollDeg.f(1)}° / ${state.coarsePitchDeg.f(1)}°",
+                    fontSize = 14.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.testTag("coarse_alignment"),
+                )
+            }
+            if (state.statusMessage.isNotBlank()) {
+                Text(state.statusMessage, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
@@ -573,7 +650,7 @@ internal fun InitializationScreen(state: InsUiState, sendAction: (String, Map<St
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         SectionTitle("Initialize navigation")
-        Text("Place the phone screen-up with its top edge pointing forward. Keep it still while gyro and accelerometer biases are measured.", fontSize = 14.sp)
+        Text("Place the phone screen-up with its top edge pointing forward. Automatic initialization takes 15 seconds: keep it still while gravity aligns roll/pitch and IMU biases are measured.", fontSize = 14.sp)
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
             SegmentedButton(selected = !manual, onClick = { manual = false }, shape = SegmentedButtonDefaults.itemShape(0, 2), modifier = Modifier.heightIn(min = 56.dp).testTag("init_auto_mode")) { Text("Automatic", fontSize = 14.sp) }
             SegmentedButton(selected = manual, onClick = { manual = true }, shape = SegmentedButtonDefaults.itemShape(1, 2), modifier = Modifier.heightIn(min = 56.dp).testTag("init_manual_mode")) { Text("Manual", fontSize = 14.sp) }
@@ -582,7 +659,7 @@ internal fun InitializationScreen(state: InsUiState, sendAction: (String, Map<St
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Automatic sources", fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                    Text("Position: GNSS\nRoll and pitch: gravity\nInitial yaw: magnetometer + declination\nMoving yaw: GNSS course only", fontSize = 14.sp)
+                    Text("Duration: 15 s stillness\nPosition: GNSS\nRoll and pitch: averaged gravity vector\nInitial yaw: magnetometer + declination\nMoving yaw: GNSS course only", fontSize = 14.sp)
                 }
             }
             Button(
@@ -688,6 +765,16 @@ internal fun SessionsScreen(state: InsUiState, sendAction: (String, Map<String, 
         KeyValueRow("TCP server", if (state.tcpConnected) "Client connected · :29500" else "Listening on :29500")
         KeyValueRow("Android accessory", if (state.aoaConnected) "Connected" else "Not connected")
         KeyValueRow("Protocol", "INS1 · 224-byte binary · CRC-32")
+        KeyValueRow("CSV trial logging", if (state.csvLoggingEnabled) "Enabled by default" else "Stopped")
+        KeyValueRow("CSV log file", state.csvLogFileName ?: "Start service to create a dated CSV")
+        state.csvLogPath?.let { path ->
+            Text(
+                "CSV path: $path",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("csv_log_path"),
+            )
+        }
         KeyValueRow("Mounting", "Screen up · top edge forward")
         KeyValueRow("App version", BuildConfig.VERSION_NAME)
     }

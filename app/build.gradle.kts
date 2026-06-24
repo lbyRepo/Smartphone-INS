@@ -15,8 +15,8 @@ android {
         applicationId = "com.example.phoneins"
         minSdk = 33
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.3.1"
+        versionCode = 8
+        versionName = "0.3.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }

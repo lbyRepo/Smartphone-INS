@@ -45,7 +45,7 @@ data class GnssFix(
 )
 
 enum class MotionProfile { VEHICLE, PEDESTRIAN }
-enum class InitSource { NONE, AUTOMATIC, MANUAL }
+enum class InitSource { NONE, AUTOMATIC, MANUAL, REPLAY }
 enum class FixStatus { NO_FIX, FIX_2D, FIX_3D, STALE }
 
 data class ManualInitialization(
@@ -55,6 +55,18 @@ data class ManualInitialization(
     val rollDeg: Double,
     val pitchDeg: Double,
     val yawDeg: Double,
+)
+
+data class ReplayInitialization(
+    val latitudeDeg: Double,
+    val longitudeDeg: Double,
+    val altitudeEllipsoidM: Double,
+    val velocityNedMps: Vec3,
+    val eulerDeg: Vec3,
+    val accelerometerBiasMps2: Vec3,
+    val gyroBiasRadps: Vec3,
+    val motionProfile: MotionProfile,
+    val imuSample: TimedImuSample?,
 )
 
 object QualityFlag {

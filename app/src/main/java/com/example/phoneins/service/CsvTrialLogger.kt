@@ -13,21 +13,21 @@ import java.util.Locale
 
 class CsvTrialLogger(private val context: Context) {
     private val directory: File
-        get() = (
-            context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
-                ?: File(context.filesDir, "documents")
-            ).resolve("trial_logs").apply { mkdirs() }
+        get() = trialLogDirectory(context)
 
+    @Volatile
     private var writer: BufferedWriter? = null
     private var rowsWritten = 0L
     var currentFile: File? = null
         private set
     val logging get() = writer != null
 
-    fun start(): File {
+    @Synchronized
+    fun start(filePrefix: String = "phoneins_trial"): File {
         stop()
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val file = File(directory, "phoneins_trial_$stamp.csv")
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+        val safePrefix = filePrefix.replace(Regex("[^A-Za-z0-9._-]+"), "_").take(96).trim('_').ifEmpty { "phoneins_trial" }
+        val file = uniqueFile(directory, "${safePrefix}_$stamp", ".csv")
         writer = file.outputStream().buffered(256 * 1024).writer(Charsets.UTF_8).buffered(256 * 1024)
         currentFile = file
         rowsWritten = 0L
@@ -35,16 +35,19 @@ class CsvTrialLogger(private val context: Context) {
         return file
     }
 
+    @Synchronized
     fun append(solution: NavigationSolution) {
         val out = writer ?: return
         out.appendLine(solution.toCsvRow())
         rowsWritten++
     }
 
+    @Synchronized
     fun flush() {
         writer?.flush()
     }
 
+    @Synchronized
     fun stop() {
         runCatching { writer?.flush() }
         runCatching { writer?.close() }
@@ -133,6 +136,18 @@ class CsvTrialLogger(private val context: Context) {
     }
 
     companion object {
+        fun trialLogDirectory(context: Context): File = (
+            context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+                ?: File(context.filesDir, "documents")
+            ).resolve("trial_logs").apply { mkdirs() }
+
+        private fun uniqueFile(directory: File, stem: String, extension: String): File {
+            var candidate = File(directory, stem + extension)
+            var suffix = 1
+            while (candidate.exists()) candidate = File(directory, "${stem}_${suffix++}$extension")
+            return candidate
+        }
+
         val HEADER = listOf(
             "sequence",
             "monotonic_nanos",

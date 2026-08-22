@@ -175,8 +175,8 @@ class PhoneInsUiTest {
                 )
             }
         }
-        composeRule.onNodeWithTag("position_separation").assertIsDisplayed()
-        composeRule.onNodeWithText("GNSS bound active · within 7.5 m").assertIsDisplayed()
+        composeRule.onNodeWithTag("position_separation").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("GNSS bound active · within 7.5 m").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -210,9 +210,9 @@ class PhoneInsUiTest {
                 )
             }
         }
-        composeRule.onNodeWithText("Origin 1.3521000, 103.8198000").assertIsDisplayed()
-        composeRule.onNodeWithText("History · INS 2 points · GNSS 0 points").assertIsDisplayed()
-        composeRule.onNodeWithText("INS displacement 15.7 m from initialization").assertIsDisplayed()
+        composeRule.onNodeWithText("Origin 1.3521000, 103.8198000").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("History · INS 2 points · GNSS 0 points").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("INS displacement 15.7 m from initialization").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Position map with 2 INS history points and 0 raw GNSS history points").fetchSemanticsNode()
     }
 
@@ -264,6 +264,8 @@ class PhoneInsUiTest {
 
     @Test
     fun decimeterRouteMapRetainsWholeRunAcrossOutageDriftAndReacquisition() {
+        val testOutageRange = 105 until 125
+        val reacquiredIndex = testOutageRange.last + 3
         val route = composeRule.activity.assets.open("google_decimeter_2021/Pixel4_ground_truth.csv")
             .bufferedReader()
             .useLines { DecimeterRouteScenario.parseGroundTruth(it) }
@@ -283,13 +285,13 @@ class PhoneInsUiTest {
         for (index in 1 until route.size) {
             DecimeterRouteScenario.imuBetween(route[index - 1], route[index], first, startNanos).forEach(engine::processImu)
             val fix = DecimeterRouteScenario.gnssFix(route[index], first, startNanos)
-            val aidingEnabled = index !in DecimeterRouteScenario.OUTAGE_START_INDEX until DecimeterRouteScenario.OUTAGE_END_INDEX
+            val aidingEnabled = index !in testOutageRange
             if (aidingEnabled) engine.processGnss(fix) else engine.observeGnssWithoutAiding(fix)
             val solution = engine.snapshot(fix.monotonicNanos, fix.unixMillis)
             map.update(solution)
             val separation = map.insTrail.last().toLocalMetresForTest(map.gnssTrail.last()).norm()
             if (!aidingEnabled) maximumOutageSeparation = maxOf(maximumOutageSeparation, separation)
-            if (index == DecimeterRouteScenario.OUTAGE_END_INDEX + 2) reacquiredSeparation = separation
+            if (index == reacquiredIndex) reacquiredSeparation = separation
         }
 
         org.junit.Assert.assertEquals(route.size, map.insTrail.size)

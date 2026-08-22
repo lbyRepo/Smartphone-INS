@@ -20,9 +20,22 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             PhoneInsTheme {
-                val launcher = rememberLauncherForActivityResult(
+                val permissionLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions(),
                 ) { }
+                val csvLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument(),
+                ) { uri ->
+                    uri ?: return@rememberLauncherForActivityResult
+                    runCatching {
+                        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    sendServiceAction(
+                        this@MainActivity,
+                        NavigationService.ACTION_CSV_REPLAY_IMPORT,
+                        mapOf(NavigationService.EXTRA_SOURCE_URI to uri.toString()),
+                    )
+                }
                 LaunchedEffect(Unit) {
                     val needed = buildList {
                         if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
@@ -33,9 +46,16 @@ class MainActivity : ComponentActivity() {
                             add(Manifest.permission.POST_NOTIFICATIONS)
                         }
                     }
-                    if (needed.isNotEmpty()) launcher.launch(needed.toTypedArray())
+                    if (needed.isNotEmpty()) permissionLauncher.launch(needed.toTypedArray())
                 }
-                PhoneInsApp { action, extras -> sendServiceAction(this@MainActivity, action, extras) }
+                PhoneInsApp(
+                    sendAction = { action, extras -> sendServiceAction(this@MainActivity, action, extras) },
+                    chooseCsv = {
+                        csvLauncher.launch(
+                            arrayOf("text/csv", "text/comma-separated-values", "text/plain", "application/vnd.ms-excel"),
+                        )
+                    },
+                )
             }
         }
     }
@@ -49,6 +69,7 @@ private fun sendServiceAction(context: Context, action: String, extras: Map<Stri
             is Double -> intent.putExtra(key, value)
             is String -> intent.putExtra(key, value)
             is Int -> intent.putExtra(key, value)
+            is Long -> intent.putExtra(key, value)
         }
     }
     if (action == NavigationService.ACTION_STOP) context.stopService(intent)

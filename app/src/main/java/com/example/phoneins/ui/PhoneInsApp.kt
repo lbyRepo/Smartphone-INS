@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -32,9 +33,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.phoneins.BuildConfig
 import com.example.phoneins.data.InsRepository
 import com.example.phoneins.data.InsUiState
+import com.example.phoneins.data.CsvReplayPhase
 import com.example.phoneins.navigation.*
 import com.example.phoneins.service.NavigationService
 import java.util.Locale
+import java.util.Date
+import java.text.SimpleDateFormat
 import kotlin.math.cos
 import kotlin.math.max
 
@@ -61,10 +65,13 @@ internal enum class Destination(val label: String, val glyph: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PhoneInsApp(sendAction: (String, Map<String, Any>) -> Unit) {
+fun PhoneInsApp(
+    sendAction: (String, Map<String, Any>) -> Unit,
+    chooseCsv: () -> Unit = {},
+) {
     val state by InsRepository.state.collectAsStateWithLifecycle()
     var destination by rememberSaveable { mutableStateOf(Destination.DASHBOARD) }
-    PhoneInsScaffold(state, destination, { destination = it }, sendAction)
+    PhoneInsScaffold(state, destination, { destination = it }, sendAction, chooseCsv)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -74,11 +81,12 @@ internal fun PhoneInsScaffold(
     destination: Destination,
     selectDestination: (Destination) -> Unit,
     sendAction: (String, Map<String, Any>) -> Unit,
+    chooseCsv: () -> Unit = {},
 ) {
     val wide = LocalConfiguration.current.screenWidthDp >= 700
     val fontScale = LocalDensity.current.fontScale
     val compactHeader = !wide && fontScale >= 1.8f
-    val positionMapState = remember { PositionMapState() }
+    val positionMapState = remember(state.trajectoryEpoch) { PositionMapState() }
     LaunchedEffect(state.solution.sequence, state.solution.initialized, state.solution.latestGnss?.monotonicNanos) {
         positionMapState.update(state.solution)
     }
@@ -88,7 +96,7 @@ internal fun PhoneInsScaffold(
                 title = {
                     Text(if (compactHeader) "Phone INS" else "Smartphone INS", fontSize = 22.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                 },
-                actions = { ServiceBadge(state.serviceRunning, state.simulated, compactHeader) },
+                actions = { ServiceBadge(state, compactHeader) },
             )
         },
         bottomBar = {
@@ -127,10 +135,10 @@ internal fun PhoneInsScaffold(
             }
             Box(Modifier.weight(1f).fillMaxHeight()) {
                 when (destination) {
-                    Destination.DASHBOARD -> DashboardScreen(state, positionMapState)
+                    Destination.DASHBOARD -> DashboardScreen(state, positionMapState, sendAction)
                     Destination.RAW -> RawDataScreen(state)
                     Destination.INITIALIZE -> InitializationScreen(state, sendAction)
-                    Destination.SETTINGS -> SessionsScreen(state, sendAction)
+                    Destination.SETTINGS -> SessionsScreen(state, sendAction, chooseCsv)
                 }
             }
         }
@@ -138,10 +146,11 @@ internal fun PhoneInsScaffold(
 }
 
 @Composable
-private fun ServiceBadge(running: Boolean, simulated: Boolean, compact: Boolean) {
+private fun ServiceBadge(state: InsUiState, compact: Boolean) {
     val text = when {
-        !running -> if (compact) "STOP" else "STOPPED"
-        simulated -> if (compact) "SIM" else "SIMULATED"
+        !state.serviceRunning -> if (compact) "STOP" else "STOPPED"
+        state.csvReplay.selectedLogName != null && state.csvReplay.phase != CsvReplayPhase.IDLE -> "REPLAY"
+        state.simulated -> if (compact) "SIM" else "SIMULATED"
         else -> "LIVE"
     }
     Surface(
@@ -156,16 +165,23 @@ private fun ServiceBadge(running: Boolean, simulated: Boolean, compact: Boolean)
 }
 
 @Composable
-internal fun DashboardScreen(state: InsUiState) {
+internal fun DashboardScreen(
+    state: InsUiState,
+    sendAction: (String, Map<String, Any>) -> Unit = { _, _ -> },
+) {
     val positionMapState = remember { PositionMapState() }
     LaunchedEffect(state.solution.sequence, state.solution.initialized, state.solution.latestGnss?.monotonicNanos) {
         positionMapState.update(state.solution)
     }
-    DashboardScreen(state, positionMapState)
+    DashboardScreen(state, positionMapState, sendAction)
 }
 
 @Composable
-private fun DashboardScreen(state: InsUiState, positionMapState: PositionMapState) {
+private fun DashboardScreen(
+    state: InsUiState,
+    positionMapState: PositionMapState,
+    sendAction: (String, Map<String, Any>) -> Unit,
+) {
     val solution = state.solution
     LazyColumn(
         modifier = Modifier.fillMaxSize().testTag("dashboard"),
@@ -176,7 +192,10 @@ private fun DashboardScreen(state: InsUiState, positionMapState: PositionMapStat
             InitializationStatusCard(state)
         }
         item {
-            StatusBanner(solution)
+            StatusBanner(state)
+        }
+        item {
+            GnssOutageControl(state, sendAction)
         }
         item {
             PositionMapCard(solution, positionMapState)
@@ -303,7 +322,8 @@ private fun InitializationStatusCard(state: InsUiState) {
 }
 
 @Composable
-private fun StatusBanner(solution: NavigationSolution) {
+private fun StatusBanner(state: InsUiState) {
+    val solution = state.solution
     val color = when {
         !solution.initialized -> MaterialTheme.colorScheme.surfaceVariant
         solution.qualityFlags and QualityFlag.GNSS_AIDING_SUSPENDED != 0 -> MaterialTheme.colorScheme.tertiaryContainer
@@ -314,6 +334,9 @@ private fun StatusBanner(solution: NavigationSolution) {
     }
     val title = when {
         !solution.initialized -> "Waiting for initialization"
+        state.forcedGnssOutage && solution.qualityFlags and QualityFlag.GNSS_AIDING_SUSPENDED != 0 ->
+            "Forced GNSS outage · raw fixes visible · dead reckoning"
+        state.forcedGnssOutage -> "Forced GNSS outage armed"
         solution.qualityFlags and QualityFlag.GNSS_AIDING_SUSPENDED != 0 -> "GNSS visible · aiding paused"
         solution.degraded -> "Dead reckoning · GNSS stale"
         solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> "GNSS fix present · aiding rejected"
@@ -326,6 +349,60 @@ private fun StatusBanner(solution: NavigationSolution) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Text("${solution.fixStatus.name.replace('_', ' ')} · ${solution.motionProfile.name.lowercase().replaceFirstChar { it.titlecase() }} profile", fontSize = 14.sp)
+        }
+    }
+}
+
+@Composable
+private fun GnssOutageControl(
+    state: InsUiState,
+    sendAction: (String, Map<String, Any>) -> Unit,
+) {
+    val active = state.forcedGnssOutage
+    Card(
+        modifier = Modifier.fillMaxWidth().testTag("gnss_outage_control"),
+        colors = if (active) {
+            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+        } else {
+            CardDefaults.cardColors()
+        },
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("GNSS aiding control", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "Raw GNSS remains visible, streamed and logged while INS corrections are withheld.",
+                fontSize = 14.sp,
+            )
+            FilledTonalButton(
+                onClick = {
+                    sendAction(
+                        NavigationService.ACTION_FORCE_GNSS_OUTAGE,
+                        mapOf("enabled" to !active),
+                    )
+                },
+                enabled = state.serviceRunning && state.solution.initialized,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .testTag("gnss_outage_toggle")
+                    .semantics {
+                        contentDescription = "Forced GNSS outage control"
+                        stateDescription = if (active) "On" else "Off"
+                    },
+                colors = if (active) {
+                    ButtonDefaults.filledTonalButtonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    )
+                } else {
+                    ButtonDefaults.filledTonalButtonColors()
+                },
+            ) {
+                Text(
+                    if (active) "End forced GNSS outage" else "Begin forced GNSS outage",
+                    fontSize = 14.sp,
+                )
+            }
         }
     }
 }
@@ -707,7 +784,17 @@ private fun ManualField(label: String, value: String, changed: (String) -> Unit,
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun SessionsScreen(state: InsUiState, sendAction: (String, Map<String, Any>) -> Unit) {
+internal fun SessionsScreen(
+    state: InsUiState,
+    sendAction: (String, Map<String, Any>) -> Unit,
+    chooseCsv: () -> Unit = {},
+) {
+    val replayOwnsService = state.csvReplay.phase in setOf(
+        CsvReplayPhase.PLAYING,
+        CsvReplayPhase.PAUSED,
+        CsvReplayPhase.SEEKING,
+        CsvReplayPhase.COMPLETED,
+    )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).testTag("sessions"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionTitle("Run control")
         Button(
@@ -721,9 +808,9 @@ internal fun SessionsScreen(state: InsUiState, sendAction: (String, Map<String, 
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("Deterministic simulator", fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                        Text("Debug builds only. Exercises motion, GNSS loss and recovery.", fontSize = 14.sp)
+                        Text("Debug builds only. Exercises repeatable motion with operator-controlled GNSS aiding.", fontSize = 14.sp)
                     }
-                    Switch(checked = state.simulated, onCheckedChange = { sendAction(NavigationService.ACTION_SIMULATION, mapOf("enabled" to it)) }, enabled = state.serviceRunning)
+                    Switch(checked = state.simulated, onCheckedChange = { sendAction(NavigationService.ACTION_SIMULATION, mapOf("enabled" to it)) }, enabled = state.serviceRunning && !replayOwnsService)
                 }
             }
         }
@@ -734,20 +821,23 @@ internal fun SessionsScreen(state: InsUiState, sendAction: (String, Map<String, 
                 SegmentedButton(
                     selected = state.solution.motionProfile == profile,
                     onClick = { sendAction(NavigationService.ACTION_PROFILE, mapOf("profile" to profile.name)) },
+                    enabled = !replayOwnsService,
                     shape = SegmentedButtonDefaults.itemShape(index, MotionProfile.entries.size),
                     modifier = Modifier.heightIn(min = 56.dp),
                 ) { Text(profile.name.lowercase().replaceFirstChar { it.titlecase() }, fontSize = 14.sp) }
             }
         }
 
-        SectionTitle("Recording and replay")
-        FilledTonalButton(onClick = { sendAction(NavigationService.ACTION_RECORDING, mapOf("enabled" to !state.recording)) }, enabled = state.serviceRunning, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+        CsvReplaySection(state, sendAction, chooseCsv)
+
+        SectionTitle("Binary recording and fixed replays")
+        FilledTonalButton(onClick = { sendAction(NavigationService.ACTION_RECORDING, mapOf("enabled" to !state.recording)) }, enabled = state.serviceRunning && !replayOwnsService, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
             Text(if (state.recording) "Stop recording" else "Record session", fontSize = 14.sp)
         }
         if (BuildConfig.SIMULATOR_AVAILABLE) {
             OutlinedButton(
                 onClick = { sendAction(NavigationService.ACTION_PUBLIC_DATASET, emptyMap()) },
-                enabled = state.serviceRunning && !state.replaying,
+                enabled = state.serviceRunning && !state.replaying && !replayOwnsService,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("public_dataset_replay"),
             ) { Text("Replay public Pixel 4 dataset", fontSize = 14.sp) }
         }
@@ -755,7 +845,7 @@ internal fun SessionsScreen(state: InsUiState, sendAction: (String, Map<String, 
             Text("No recorded sessions yet.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
             state.sessionNames.take(5).forEach { name ->
-                OutlinedButton(onClick = { sendAction(NavigationService.ACTION_REPLAY, mapOf("name" to name)) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                OutlinedButton(onClick = { sendAction(NavigationService.ACTION_REPLAY, mapOf("name" to name)) }, enabled = !replayOwnsService, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                     Text("Replay $name", fontSize = 14.sp, maxLines = 1)
                 }
             }
@@ -780,7 +870,162 @@ internal fun SessionsScreen(state: InsUiState, sendAction: (String, Map<String, 
     }
 }
 
+@Composable
+private fun CsvReplaySection(
+    state: InsUiState,
+    sendAction: (String, Map<String, Any>) -> Unit,
+    chooseCsv: () -> Unit,
+) {
+    val replay = state.csvReplay
+    val lockedSelection = replay.phase in setOf(
+        CsvReplayPhase.PLAYING,
+        CsvReplayPhase.PAUSED,
+        CsvReplayPhase.SEEKING,
+        CsvReplayPhase.COMPLETED,
+    )
+    SectionTitle("CSV trial replay")
+    Text(
+        "Re-run logged raw IMU and GNSS through the current navigation algorithm.",
+        fontSize = 14.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    OutlinedButton(
+        onClick = chooseCsv,
+        enabled = !lockedSelection,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("choose_csv_replay"),
+    ) { Text("Choose CSV file", fontSize = 14.sp) }
+
+    if (state.recentTrialLogs.isEmpty()) {
+        Text("No completed CSV trial logs found.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    } else {
+        Text("Recent trial logs", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        state.recentTrialLogs.forEach { log ->
+            OutlinedButton(
+                onClick = {
+                    sendAction(NavigationService.ACTION_CSV_REPLAY_SELECT, mapOf(NavigationService.EXTRA_LOG_ID to log.id))
+                },
+                enabled = !lockedSelection,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp).testTag("recent_csv_log"),
+            ) {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(log.displayName, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                    Text(
+                        "${formatReplayDate(log.modifiedMillis)} · ${formatReplayTime(log.durationMillis)} · ${if (log.rowCount >= 0) "${log.rowCount} rows" else "row count on selection"} · ${formatFileSize(log.sizeBytes)}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+
+    if (replay.phase == CsvReplayPhase.INDEXING) {
+        LinearProgressIndicator(Modifier.fillMaxWidth().testTag("csv_replay_indexing"))
+    }
+    val selectedName = replay.selectedLogName
+    if (selectedName != null) {
+        Card(Modifier.fillMaxWidth().testTag("csv_replay_controls")) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(selectedName, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                Text(
+                    "${replay.phase.name.lowercase().replaceFirstChar(Char::titlecase)} · ${replay.rowCount} rows",
+                    fontSize = 14.sp,
+                )
+                replay.message?.let {
+                    Text(it, fontSize = 14.sp, color = if (replay.phase == CsvReplayPhase.ERROR) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                var seekFraction by remember(selectedName) { mutableFloatStateOf(0f) }
+                var dragging by remember(selectedName) { mutableStateOf(false) }
+                LaunchedEffect(replay.positionMillis, replay.durationMillis) {
+                    if (!dragging) seekFraction = if (replay.durationMillis > 0) replay.positionMillis.toFloat() / replay.durationMillis.toFloat() else 0f
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(formatReplayTime((seekFraction * replay.durationMillis.toFloat()).toLong()), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                    Text(formatReplayTime(replay.durationMillis), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                }
+                Slider(
+                    value = seekFraction.coerceIn(0f, 1f),
+                    onValueChange = { dragging = true; seekFraction = it },
+                    onValueChangeFinished = {
+                        dragging = false
+                        sendAction(
+                            NavigationService.ACTION_CSV_REPLAY_SEEK,
+                            mapOf(NavigationService.EXTRA_POSITION_MILLIS to (seekFraction * replay.durationMillis.toFloat()).toLong()),
+                        )
+                    },
+                    enabled = replay.phase in setOf(CsvReplayPhase.READY, CsvReplayPhase.PLAYING, CsvReplayPhase.PAUSED, CsvReplayPhase.COMPLETED),
+                    modifier = Modifier.fillMaxWidth().testTag("csv_replay_seek").semantics {
+                        contentDescription = "CSV replay position"
+                        stateDescription = "${formatReplayTime(replay.positionMillis)} of ${formatReplayTime(replay.durationMillis)}"
+                    },
+                )
+
+                Text("Playback speed", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                listOf(0.5, 1.0, 2.0, 10.0).chunked(2).forEach { speeds ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        speeds.forEach { speed ->
+                            FilledTonalButton(
+                                onClick = { sendAction(NavigationService.ACTION_CSV_REPLAY_SPEED, mapOf(NavigationService.EXTRA_SPEED to speed)) },
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                colors = if (replay.speed == speed) ButtonDefaults.filledTonalButtonColors() else ButtonDefaults.filledTonalButtonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            ) { Text("${speed}×", fontSize = 14.sp) }
+                        }
+                    }
+                }
+
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            sendAction(
+                                if (replay.phase == CsvReplayPhase.PLAYING) NavigationService.ACTION_CSV_REPLAY_PAUSE else NavigationService.ACTION_CSV_REPLAY_PLAY,
+                                emptyMap(),
+                            )
+                        },
+                        enabled = replay.phase in setOf(CsvReplayPhase.READY, CsvReplayPhase.PLAYING, CsvReplayPhase.PAUSED),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("csv_replay_play_pause"),
+                    ) { Text(if (replay.phase == CsvReplayPhase.PLAYING) "Pause" else "Play", fontSize = 14.sp) }
+                    OutlinedButton(
+                        onClick = { sendAction(NavigationService.ACTION_CSV_REPLAY_STOP, emptyMap()) },
+                        enabled = replay.phase in setOf(CsvReplayPhase.PLAYING, CsvReplayPhase.PAUSED, CsvReplayPhase.SEEKING),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    ) { Text("Stop", fontSize = 14.sp) }
+                }
+                OutlinedButton(
+                    onClick = { sendAction(NavigationService.ACTION_CSV_REPLAY_RESTART, emptyMap()) },
+                    enabled = replay.phase in setOf(CsvReplayPhase.PLAYING, CsvReplayPhase.PAUSED, CsvReplayPhase.COMPLETED),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("csv_replay_restart"),
+                ) { Text("Restart from beginning", fontSize = 14.sp) }
+                OutlinedButton(
+                    onClick = { sendAction(NavigationService.ACTION_CSV_REPLAY_RETURN_TO_SOURCE, emptyMap()) },
+                    enabled = replay.phase != CsvReplayPhase.INDEXING,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("csv_replay_return"),
+                ) { Text("Return to live sensors", fontSize = 14.sp) }
+
+                replay.outputCsvName?.let { Text("Reprocessed output: $it", fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
+                replay.outputCsvPath?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("csv_replay_output_path")) }
+            }
+        }
+    } else if (replay.phase == CsvReplayPhase.ERROR) {
+        Text(replay.message ?: "Unable to load CSV", fontSize = 14.sp, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("csv_replay_error"))
+    }
+}
+
 @Composable private fun SectionTitle(text: String) = Text(text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
+
+private fun formatReplayTime(millis: Long): String {
+    val totalSeconds = millis.coerceAtLeast(0L) / 1_000L
+    return String.format(Locale.US, "%d:%02d", totalSeconds / 60L, totalSeconds % 60L)
+}
+
+private fun formatReplayDate(millis: Long): String =
+    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(millis))
+
+private fun formatFileSize(bytes: Long): String = when {
+    bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+    bytes >= 1024L -> String.format(Locale.US, "%.1f kB", bytes / 1024.0)
+    else -> "$bytes B"
+}
 
 @Composable
 private fun KeyValueRow(label: String, value: String) {

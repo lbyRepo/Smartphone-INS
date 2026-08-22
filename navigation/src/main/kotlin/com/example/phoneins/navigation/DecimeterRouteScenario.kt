@@ -11,8 +11,6 @@ import kotlin.math.sin
  * GnssLogger fixture bundled by gnss_lib_py contains only 22 gyro samples.
  */
 object DecimeterRouteScenario {
-    const val OUTAGE_START_INDEX = 105
-    const val OUTAGE_END_INDEX = 125
     private const val UNIX_GPS_EPOCH_OFFSET_MS = 315_964_800_000L
     private const val GPS_UTC_LEAP_MS = 18_000L
     private const val STANDARD_GRAVITY = 9.80665

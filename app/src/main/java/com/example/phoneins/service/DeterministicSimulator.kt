@@ -3,7 +3,7 @@ package com.example.phoneins.service
 import com.example.phoneins.navigation.*
 import kotlin.math.*
 
-/** Debug-only deterministic scenario: stationary, accelerate, turn, GNSS loss, recovery. */
+/** Debug-only deterministic scenario: stationary, accelerate and turn with operator-controlled GNSS aiding. */
 class DeterministicSimulator(
     private val startNanos: Long,
     private val startMillis: Long,
@@ -34,8 +34,7 @@ class DeterministicSimulator(
         val magDisturbance = if (t > 10) 80.0 * sin(t * 3) else 0.0
         val mag = MagSample(nowNanos, Vec3(31.0, -4.0 + magDisturbance, 34.0))
         val second = floor(t).toLong()
-        val gnssOutage = t in 24.0..32.0
-        val gnss = if (second != lastGnssSecond && !gnssOutage) {
+        val gnss = if (second != lastGnssSecond) {
             lastGnssSecond = second
             val distance = if (t < 4) 0.0 else if (t < 8) (t - 4).pow(2) else 16.0 + (t - 8) * 8.0
             val north = distance * cos(yaw)

@@ -159,6 +159,41 @@ class NavigationEngine(
     }
 
     @Synchronized
+    fun initializeReplay(request: ReplayInitialization) {
+        require(request.latitudeDeg in -90.0..90.0) { "Latitude must be between -90 and 90 degrees" }
+        require(request.longitudeDeg in -180.0..180.0) { "Longitude must be between -180 and 180 degrees" }
+        require(request.altitudeEllipsoidM in -1_000.0..100_000.0) { "Altitude is outside the supported range" }
+        require(request.eulerDeg.y in -90.0..90.0) { "Pitch must be between -90 and 90 degrees" }
+
+        profile = request.motionProfile
+        positionEcef = geodeticToEcef(request.latitudeDeg, request.longitudeDeg, request.altitudeEllipsoidM)
+        val geo = ecefToGeodetic(positionEcef)
+        val nedToEcef = transpose3(ecefToNedMatrix(geo.latitudeRad, geo.longitudeRad))
+        velocityEcef = multiply3(nedToEcef, request.velocityNedMps)
+        bodyToEcef = Quaternion.fromMatrix(
+            multiply3(
+                nedToEcef,
+                bodyToNedMatrix(
+                    Math.toRadians(request.eulerDeg.x),
+                    Math.toRadians(request.eulerDeg.y),
+                    Math.toRadians(((request.eulerDeg.z % 360.0) + 360.0) % 360.0),
+                ),
+            ),
+        )
+        accelerometerBias = request.accelerometerBiasMps2
+        gyroBias = request.gyroBiasRadps
+        lastImu = request.imuSample
+        initSource = InitSource.REPLAY
+        initializedWithMagnetometer = false
+        movementLatched = false
+        courseAided = false
+        qualifyingCourseFixes = 0
+        stationaryAnchorEcef = null
+        stationaryAnchorSamples = 0
+        resetCovariance()
+    }
+
+    @Synchronized
     fun processImu(sample: TimedImuSample) {
         updateImuStationarity(sample)
         val previous = lastImu

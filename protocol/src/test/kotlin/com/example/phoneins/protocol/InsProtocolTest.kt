@@ -46,6 +46,13 @@ class InsProtocolTest {
     }
 
     @Test
+    fun replayInitializationUsesExtendedEnumValueWithoutChangingFrameShape() {
+        val frame = InsProtocol.encode(solution().copy(initializationSource = InitSource.REPLAY))
+        assertEquals(InsProtocol.FRAME_BYTES, frame.size)
+        assertEquals(3, InsProtocol.decode(frame).initializationSource)
+    }
+
+    @Test
     fun versionOneGoldenFrameMatchesNormativeCodec() {
         val golden = checkNotNull(javaClass.classLoader.getResourceAsStream("golden_v1.bin")).use { it.readBytes() }
         val encoded = InsProtocol.encode(solution().copy(sequence = 0, monotonicNanos = 1_000_000_000L))

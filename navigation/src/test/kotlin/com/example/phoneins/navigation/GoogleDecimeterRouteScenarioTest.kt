@@ -8,6 +8,9 @@ import kotlin.test.Test
 import kotlin.test.assertTrue
 
 class GoogleDecimeterRouteScenarioTest {
+    private val testOutageRange = 105 until 125
+    private val reacquiredIndex = testOutageRange.last + 3
+
     @Test
     fun routeShowsOutageDriftReacquisitionBoundedTiltAndZupt() {
         val route = resource("google_decimeter_2021/Pixel4_ground_truth.csv")
@@ -40,7 +43,7 @@ class GoogleDecimeterRouteScenarioTest {
         for (index in 1 until route.size) {
             DecimeterRouteScenario.imuBetween(route[index - 1], route[index], first, startNanos).forEach(engine::processImu)
             val fix = DecimeterRouteScenario.gnssFix(route[index], first, startNanos)
-            val aidingEnabled = index !in DecimeterRouteScenario.OUTAGE_START_INDEX until DecimeterRouteScenario.OUTAGE_END_INDEX
+            val aidingEnabled = index !in testOutageRange
             if (aidingEnabled) engine.processGnss(fix) else engine.observeGnssWithoutAiding(fix)
             val solution = engine.snapshot(fix.monotonicNanos, fix.unixMillis)
             val positionError = horizontalDistanceM(
@@ -65,7 +68,7 @@ class GoogleDecimeterRouteScenarioTest {
             if (route[index].speedMps < 0.05 && route[index - 1].speedMps < 0.05 && index > 3) {
                 maximumStationarySpeed = maxOf(maximumStationarySpeed, hypot(solution.velocityNedMps.x, solution.velocityNedMps.y))
             }
-            val steadilyAided = index < DecimeterRouteScenario.OUTAGE_START_INDEX || index >= DecimeterRouteScenario.OUTAGE_END_INDEX + 2
+            val steadilyAided = index < testOutageRange.first || index >= reacquiredIndex
             if (!aidingEnabled) {
                 suspendedFixes++
                 maximumOutageSeparation = maxOf(maximumOutageSeparation, positionError)
@@ -83,7 +86,7 @@ class GoogleDecimeterRouteScenarioTest {
                     maximumAidedVelocityErrorIndex = index
                 }
             }
-            if (index == DecimeterRouteScenario.OUTAGE_END_INDEX + 2) reacquiredSeparation = positionError
+            if (index == reacquiredIndex) reacquiredSeparation = positionError
         }
 
         val rollRange = maximumRoll - minimumRoll

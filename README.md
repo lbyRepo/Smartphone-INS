@@ -24,12 +24,13 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 - Vehicle and pedestrian motion profiles.
 - 100 Hz binary INS output over TCP and Android Open Accessory-oriented transport.
 - Default-on CSV trial logging for field evaluation.
+- On-device CSV trial reprocessing with recent-log selection, file import, seeking, and variable playback speed.
 - Deterministic replay/simulator support for repeatable UI and navigation testing.
 - Python receiver and MATLAB plotting script for downstream analysis.
 
 ## Project status
 
-Current app version: `0.3.4`.
+Current app version: `0.3.5`.
 
 This is an engineering demonstrator, not a certified navigation product. The emulator and replay tests validate app behavior, UI state transitions, protocol handling, logging, and deterministic scenarios. Actual sensor quality, thermal behavior, sustained rates, USB behavior, and navigation performance must be validated on physical phones and real routes.
 
@@ -45,6 +46,15 @@ This is an engineering demonstrator, not a certified navigation product. The emu
 │   └── matlab/   MATLAB post-processing plots for logged CSV files
 └── docs/         Protocol, verification notes, datasets, hardware guidance
 ```
+
+## Navigation algorithm map
+
+If you want to inspect or modify the navigation solution, start with these four files:
+
+- [`NavigationEngine.kt`](navigation/src/main/kotlin/com/example/phoneins/navigation/NavigationEngine.kt) — 15-state ECEF error-state EKF, INS propagation, initialization, GNSS measurement corrections, stationary constraints, and course-based heading aiding.
+- [`NavigationMath.kt`](navigation/src/main/kotlin/com/example/phoneins/navigation/NavigationMath.kt) — WGS84/ECEF/NED coordinate transformations, quaternion and matrix operations, gravity, and attitude calculations.
+- [`Models.kt`](navigation/src/main/kotlin/com/example/phoneins/navigation/Models.kt) — IMU, magnetometer, GNSS, initialization, quality, and navigation-solution data types.
+- [`DecimeterRouteScenario.kt`](navigation/src/main/kotlin/com/example/phoneins/navigation/DecimeterRouteScenario.kt) — deterministic public-dataset replay support used by the debug app and regression tests; it is not part of the core fusion algorithm.
 
 ## Requirements
 
@@ -106,7 +116,7 @@ For indoor demos where GNSS is weak, use the deterministic replay mode so the UI
 CSV logging is enabled by default when the navigation service starts. Each service run creates a dated file:
 
 ```text
-phoneins_trial_YYYYMMDD_HHMMSS.csv
+phoneins_trial_YYYYMMDD_HHMMSS_SSS.csv
 ```
 
 On Android devices, logs are written under the app-specific Documents directory:
@@ -127,6 +137,18 @@ Each CSV row corresponds to the app’s 100 Hz output stream and includes:
 - Estimated accelerometer and gyroscope biases.
 - Raw IMU measurements.
 - GNSS solution, fix age, accuracy, velocity, satellite count, and validity flags.
+
+### Reprocess a logged trial
+
+Open **More → CSV trial replay** to select one of the recent completed logs, or choose a CSV through Android's document picker. The app rebuilds the navigation solution from the logged raw IMU and GNSS using the current algorithm.
+
+Replay supports pause, seek, restart, and `0.5×`, `1×`, `2×`, and `10×` speeds. The Dashboard, Raw Data page, position map, TCP, and USB output follow the reprocessed solution. Results are saved separately without modifying the source log:
+
+```text
+phoneins_reprocessed_<source-name>_YYYYMMDD_HHMMSS_SSS.csv
+```
+
+After replay completes, the final state remains visible. Use **Return to live sensors** to restore the previous live or simulated source and initialize it again.
 
 ## MATLAB post-processing
 

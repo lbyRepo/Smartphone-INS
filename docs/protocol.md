@@ -23,7 +23,7 @@ Offsets below are absolute frame offsets. All vectors are ordered X/Y/Z accordin
 
 | Offset | Type | Field | Unit |
 |---:|---|---|---|
-| 36 | `uint8` | Initialization source: none=0, automatic=1, manual=2 | — |
+| 36 | `uint8` | Initialization source: none=0, automatic=1, manual=2, replay=3 | — |
 | 37 | `uint8` | Motion profile: vehicle=0, pedestrian=1 | — |
 | 38 | `uint8` | Fix: none=0, 2D=1, 3D=2, stale=3 | — |
 | 39 | `uint8` | Satellites used | SV |

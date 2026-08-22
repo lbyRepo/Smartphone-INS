@@ -15,6 +15,7 @@ data class InsUiState(
     val aoaConnected: Boolean = false,
     val recording: Boolean = false,
     val replaying: Boolean = false,
+    val forcedGnssOutage: Boolean = false,
     val outputRateHz: Double = 0.0,
     val imuRateHz: Double = 0.0,
     val packetsSent: Long = 0,
@@ -30,7 +31,43 @@ data class InsUiState(
     val initializationDurationSeconds: Double = 15.0,
     val coarseRollDeg: Double = Double.NaN,
     val coarsePitchDeg: Double = Double.NaN,
+    val recentTrialLogs: List<TrialLogSummary> = emptyList(),
+    val csvReplay: CsvReplayUiState = CsvReplayUiState(),
+    val trajectoryEpoch: Long = 0L,
 )
+
+enum class CsvReplayPhase { IDLE, INDEXING, READY, PLAYING, PAUSED, SEEKING, COMPLETED, ERROR }
+
+data class TrialLogSummary(
+    val id: String,
+    val displayName: String,
+    val modifiedMillis: Long,
+    val durationMillis: Long,
+    val rowCount: Int,
+    val sizeBytes: Long,
+)
+
+data class CsvReplayUiState(
+    val phase: CsvReplayPhase = CsvReplayPhase.IDLE,
+    val selectedLogId: String? = null,
+    val selectedLogName: String? = null,
+    val positionMillis: Long = 0L,
+    val durationMillis: Long = 0L,
+    val rowCount: Int = 0,
+    val speed: Double = 1.0,
+    val message: String? = null,
+    val outputCsvName: String? = null,
+    val outputCsvPath: String? = null,
+) {
+    val active: Boolean get() = phase in setOf(
+        CsvReplayPhase.INDEXING,
+        CsvReplayPhase.READY,
+        CsvReplayPhase.PLAYING,
+        CsvReplayPhase.PAUSED,
+        CsvReplayPhase.SEEKING,
+        CsvReplayPhase.COMPLETED,
+    )
+}
 
 object InsRepository {
     private val mutableState = MutableStateFlow(InsUiState())

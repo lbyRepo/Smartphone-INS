@@ -93,6 +93,8 @@ class NavigationService : Service() {
                 csvLoggingEnabled = csvLogger.logging,
                 csvLogFileName = csvFile.name,
                 csvLogPath = csvFile.absolutePath,
+                loggingError = null,
+                droppedLogRecords = 0,
                 statusMessage = "Service running · CSV logging enabled · initialize to begin",
                 sessionNames = recorder.sessions(),
             )
@@ -236,6 +238,8 @@ class NavigationService : Service() {
                 aoaConnected = false,
                 recording = false,
                 csvLoggingEnabled = false,
+                loggingError = listOfNotNull(csvLogger.error, recorder.error).distinct().joinToString(" · ").ifEmpty { null },
+                droppedLogRecords = csvLogger.droppedRecords + recorder.droppedRecords,
                 forcedGnssOutage = false,
                 initializationInProgress = false,
                 initializationProgress = 0f,
@@ -264,6 +268,11 @@ class NavigationService : Service() {
     }
 
     private fun acceptImu(sample: TimedImuSample) {
+        if (!sample.fresh) {
+            synchronized(stationaryImu) { stationaryImu.clear() }
+            engine.processImu(sample)
+            return
+        }
         synchronized(stationaryImu) {
             stationaryImu.addLast(sample)
             while (stationaryImu.isNotEmpty() &&
@@ -339,7 +348,13 @@ class NavigationService : Service() {
                     val publishedImuRate = imuRate
                     if (uiUpdatePending.compareAndSet(false, true)) scope.launch {
                         try {
-                            val status = solutionStatus(solution)
+                            val logErrors = listOfNotNull(csvLogger.error, recorder.error).distinct().joinToString(" · ").ifEmpty { null }
+                            val lostRecords = csvLogger.droppedRecords + recorder.droppedRecords
+                            val status = solutionStatus(solution) + when {
+                                logErrors != null -> " · $logErrors"
+                                lostRecords > 0 -> " · Logging warning: $lostRecords dropped records"
+                                else -> ""
+                            }
                             InsRepository.update {
                                 it.copy(
                                     solution = solution,
@@ -348,10 +363,14 @@ class NavigationService : Service() {
                                     aoaConnected = aoa.connected,
                                     recording = recorder.recording,
                                     csvLoggingEnabled = if (csvReplayPrepared) replayCsvLogger?.logging == true else csvLogger.logging,
+                                    loggingError = logErrors,
+                                    droppedLogRecords = lostRecords,
                                     csvLogFileName = if (csvReplayPrepared) replayCsvLogger?.currentFile?.name else csvLogger.currentFile?.name,
                                     csvLogPath = if (csvReplayPrepared) replayCsvLogger?.currentFile?.absolutePath else csvLogger.currentFile?.absolutePath,
                                     outputRateHz = publishedOutputRate,
                                     imuRateHz = publishedImuRate,
+                                    accelerometerAgeMs = acquisition?.accelerationTimeNanos?.let { stamp -> (SystemClock.elapsedRealtimeNanos() - stamp) / 1e6 },
+                                    gyroscopeAgeMs = acquisition?.gyroTimeNanos?.let { stamp -> (SystemClock.elapsedRealtimeNanos() - stamp) / 1e6 },
                                     packetsSent = publishedPackets,
                                     droppedPackets = drops,
                                     statusMessage = status,
@@ -593,7 +612,7 @@ class NavigationService : Service() {
     }
 
     private fun startReplayOutput(source: java.io.File) {
-        val logger = replayCsvLogger ?: CsvTrialLogger(this).also { replayCsvLogger = it }
+        val logger = replayCsvLogger ?: CsvTrialLogger(this, asynchronous = false).also { replayCsvLogger = it }
         val file = logger.start("phoneins_reprocessed_${source.nameWithoutExtension}")
         InsRepository.update {
             it.copy(
@@ -838,7 +857,7 @@ class NavigationService : Service() {
         var imu = row.takeIf {
             it.imuMonotonicNanos > 0L && it.imuMonotonicNanos != feed.lastImuNanos &&
                 it.acceleration.isFiniteVec() && it.angularRate.isFiniteVec()
-        }?.let { TimedImuSample(it.imuMonotonicNanos, it.acceleration, it.angularRate) }
+        }?.let { TimedImuSample(it.imuMonotonicNanos, it.acceleration, it.angularRate, fresh = it.imuFresh) }
         val gnss = row.takeIf {
             it.gnssMonotonicNanos > 0L && it.gnssMonotonicNanos != feed.lastGnssNanos &&
                 it.gnssPosition.x.isFinite() && it.gnssPosition.y.isFinite()

@@ -30,7 +30,7 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 
 ## Project status
 
-Current app version: `0.3.5`.
+Current app version: `0.3.6`.
 
 This is an engineering demonstrator, not a certified navigation product. The emulator and replay tests validate app behavior, UI state transitions, protocol handling, logging, and deterministic scenarios. Actual sensor quality, thermal behavior, sustained rates, USB behavior, and navigation performance must be validated on physical phones and real routes.
 
@@ -223,6 +223,26 @@ Run screenshot validation:
 The test suite includes deterministic navigation/replay checks, stationary alignment regressions, protocol golden-frame checks, UI state tests, and screenshot baselines covering light/dark themes, orientation, and font-scale variants.
 
 ## Hardware validation notes
+
+The bundled Pixel 4 route replay is a **reference-driven simulation**, not an independent
+phone-accuracy benchmark. `DecimeterRouteScenario` synthesizes the IMU from the reference
+route and supplies reference-derived GNSS fixes. Its error plots demonstrate filter and
+outage behavior under those assumptions; they must not be presented as measured Pixel 4
+navigation accuracy. An independent assessment requires synchronized recorded raw IMU/GNSS
+and a separate reference trajectory, including mounting, timing and lever-arm calibration.
+
+Live CSV and binary recording use bounded background queues (1,000 records per file).
+Slow storage cannot block the 100 Hz publisher: queue overflow drops the newest record
+and increments **Dropped log records** on the More page. Storage failures stop the affected
+logger and display **Logging error** without stopping navigation. A shutdown drains accepted
+records, waiting up to two seconds; an unfinished drain is reported and the file may still
+be incomplete. CSV algorithm replay remains lossless and writes synchronously on its own
+worker. The CSV columns and INS1 binary layout are unchanged.
+
+Live IMU pairing uses a causal accelerometer hold of at most 20 ms. Older/missing samples
+are marked HELD and are not integrated. The Raw Data page shows separate live accelerometer
+and gyroscope ages. Reported position/velocity uncertainty is transformed from ECEF into
+NED, and attitude uncertainty into Euler angles (which become ill-conditioned near ±90° pitch).
 
 Simulator validation is useful for application behavior, but it is not authoritative for physical sensor performance. For real-world use, validate on actual phones, including:
 

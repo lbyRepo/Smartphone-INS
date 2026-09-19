@@ -9,6 +9,15 @@ import kotlin.test.assertTrue
 
 class CsvReplayFileTest {
     @Test
+    fun preservesHeldImuFlagAndAcceptsOlderLogsWithoutQualityFlags() {
+        val columns = CsvTrialLogger.HEADER.split(',')
+        val held = validValues(1_000_000_000L, true) +
+            ("quality_flags" to com.example.phoneins.navigation.QualityFlag.IMU_HELD.toString())
+        assertEquals(false, CsvReplayIndex.open(writeCsv(columns, listOf(held))).row(0).imuFresh)
+        assertEquals(true, CsvReplayIndex.open(writeCsv(columns - "quality_flags", listOf(held))).row(0).imuFresh)
+    }
+
+    @Test
     fun acceptsReorderedColumnsAndAdditionalColumns() {
         val columns = CsvTrialLogger.HEADER.split(',').reversed() + "future_field"
         val file = writeCsv(columns, listOf(validValues(0L, initialized = false), validValues(10_000_000L, initialized = true)))

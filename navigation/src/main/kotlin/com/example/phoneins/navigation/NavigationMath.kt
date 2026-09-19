@@ -5,6 +5,32 @@ import kotlin.math.*
 internal const val WGS84_A = 6_378_137.0
 internal const val WGS84_E2 = 6.69437999014e-3
 
+/** Skew of ECEF specific force for a left-multiplicative ECEF attitude error. */
+internal fun ecefSpecificForceSkew(bodyToEcef: DoubleArray, forceBody: Vec3): DoubleArray {
+    val f = multiply3(bodyToEcef, forceBody)
+    return doubleArrayOf(0.0, -f.z, f.y, f.z, 0.0, -f.x, -f.y, f.x, 0.0)
+}
+
+/** sqrt(diag(J P J^T)), including off-diagonal covariance terms. */
+internal fun projectedStandardDeviation(p: DoubleArray, size: Int, offset: Int, j: DoubleArray): Vec3 =
+    Vec3.from(DoubleArray(3) { axis ->
+        var variance = 0.0
+        for (r in 0..2) for (c in 0..2) {
+            variance += j[axis * 3 + r] * p[(offset + r) * size + offset + c] * j[axis * 3 + c]
+        }
+        sqrt(variance.coerceAtLeast(0.0))
+    })
+
+/** Maps a small left NED rotation into roll/pitch/yaw perturbations.
+ * Euler uncertainty grows near gimbal lock; cap the singular denominator, not the uncertainty.
+ */
+internal fun nedRotationToEulerJacobian(pitch: Double, yaw: Double): DoubleArray {
+    val cp = cos(pitch).coerceAtLeast(1e-6)
+    val cy = cos(yaw)
+    val sy = sin(yaw)
+    return doubleArrayOf(cy / cp, sy / cp, 0.0, -sy, cy, 0.0, cy * sin(pitch) / cp, sy * sin(pitch) / cp, 1.0)
+}
+
 data class Geodetic(val latitudeRad: Double, val longitudeRad: Double, val altitudeM: Double)
 
 data class Quaternion(val w: Double, val x: Double, val y: Double, val z: Double) {

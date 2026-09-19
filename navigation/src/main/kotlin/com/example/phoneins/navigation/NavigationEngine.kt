@@ -144,7 +144,14 @@ class NavigationEngine(
         positionEcef = geodeticToEcef(gnss.latitudeDeg, gnss.longitudeDeg, gnss.altitudeEllipsoidM)
         val geo = ecefToGeodetic(positionEcef)
         val nedToEcef = transpose3(ecefToNedMatrix(geo.latitudeRad, geo.longitudeRad))
-        velocityEcef = multiply3(nedToEcef, gnss.velocityNedMps)
+        // Missing velocity components are not observations. Use zero only as an
+        // initial prior; never rotate NaN into the nominal ECEF state.
+        val initialVelocity = Vec3(
+            if (gnss.hasHorizontalVelocity) gnss.velocityNedMps.x.takeIf { it.isFinite() } ?: 0.0 else 0.0,
+            if (gnss.hasHorizontalVelocity) gnss.velocityNedMps.y.takeIf { it.isFinite() } ?: 0.0 else 0.0,
+            if (gnss.hasDerivedDownVelocity) gnss.velocityNedMps.z.takeIf { it.isFinite() } ?: 0.0 else 0.0,
+        )
+        velocityEcef = multiply3(nedToEcef, initialVelocity)
         bodyToEcef = Quaternion.fromMatrix(multiply3(nedToEcef, bodyToNedMatrix(roll, pitch, yaw)))
         gyroBias = stationaryAngularRate
         accelerometerBias = stationaryAcceleration - multiply3(transpose3(bodyToEcef.toMatrix()), gravityEcef(positionEcef) * -1.0)
@@ -154,7 +161,9 @@ class NavigationEngine(
         stationaryAnchorEcef = positionEcef
         stationaryAnchorSamples = 1
         lastGnssPositionUpdateNanos = gnss.monotonicNanos
-        if (gnss.hasHorizontalVelocity) lastGnssVelocityUpdateNanos = gnss.monotonicNanos
+        if (gnss.hasHorizontalVelocity && gnss.velocityNedMps.x.isFinite() && gnss.velocityNedMps.y.isFinite()) {
+            lastGnssVelocityUpdateNanos = gnss.monotonicNanos
+        }
         resetCovariance()
     }
 
@@ -195,10 +204,18 @@ class NavigationEngine(
 
     @Synchronized
     fun processImu(sample: TimedImuSample) {
-        updateImuStationarity(sample)
         val previous = lastImu
+        if (previous != null && sample.monotonicNanos <= previous.monotonicNanos) return
         lastImu = sample
-        if (initSource == InitSource.NONE || previous == null) return
+        if (!sample.fresh || !sample.accelerationMps2.toArray().all { it.isFinite() } ||
+            !sample.angularRateRadps.toArray().all { it.isFinite() }) {
+            recentImu.clear()
+            imuStationary = false
+            imuClearlyMoving = false
+            return
+        }
+        updateImuStationarity(sample)
+        if (initSource == InitSource.NONE || previous == null || !previous.fresh) return
         val dt = (sample.monotonicNanos - previous.monotonicNanos) * 1e-9
         if (dt <= 0.0 || dt > 0.1) return
 
@@ -260,15 +277,19 @@ class NavigationEngine(
         val velocityUsable = fix.hasHorizontalVelocity && fix.velocityNedMps.x.isFinite() &&
             fix.velocityNedMps.y.isFinite() && horizontalSpeed <= MAX_GNSS_SPEED_MPS
         if (velocityUsable) {
-            val measuredVelocity = multiply3(nedToEcef, fix.velocityNedMps)
+            val predictedNed = multiply3(ecefToNed, velocityEcef)
+            val downUsable = fix.hasDerivedDownVelocity && fix.velocityNedMps.z.isFinite()
+            val observedNed = fix.velocityNedMps.copy(z = if (downUsable) fix.velocityNedMps.z else predictedNed.z)
+            val measuredVelocity = multiply3(nedToEcef, observedNed)
             val speedNoise = fix.speedAccuracyMps.takeIf { it.isFinite() }?.coerceIn(0.1, 10.0) ?: 2.0
-            val downNoise = if (fix.hasDerivedDownVelocity) max(1.5, speedNoise * 3) else 50.0
+            val downNoise = if (downUsable) max(1.5, speedNoise * 3) else 50.0
             val velocityAxisMask = updateNedMeasurement(
-                multiply3(ecefToNed, measuredVelocity - velocityEcef),
+                observedNed - predictedNed,
                 VELOCITY,
                 ecefToNed,
                 doubleArrayOf(speedNoise, speedNoise, downNoise),
                 correctAttitude = false,
+                axisMask = if (downUsable) 7 else AXIS_N or AXIS_E,
             )
             velocityAccepted = (velocityAxisMask and (AXIS_N or AXIS_E)) == (AXIS_N or AXIS_E)
             if (velocityAccepted) {
@@ -279,6 +300,10 @@ class NavigationEngine(
                 trackConsistentRejectedVelocity(measuredVelocity, speedNoise)
             ) {
                 reanchorVelocity(measuredVelocity, speedNoise, downNoise)
+                if (!downUsable) {
+                    val reanchoredNed = multiply3(ecefToNed, velocityEcef)
+                    velocityEcef = multiply3(nedToEcef, reanchoredNed.copy(z = predictedNed.z))
+                }
                 lastGnssVelocityUpdateNanos = fix.monotonicNanos
                 velocityAccepted = true
             }
@@ -331,7 +356,8 @@ class NavigationEngine(
         val euler = eulerFromBodyToNed(bodyToNed)
         val gnssAgeNanos = lastGnss?.let { monotonicNanos - it.monotonicNanos } ?: Long.MAX_VALUE
         val gnssFresh = gnssAgeNanos in 0..GNSS_STALE_NANOS
-        val imuFresh = lastImu?.let { monotonicNanos - it.monotonicNanos in 0..IMU_STALE_NANOS } == true
+        val imuFresh = lastImu?.let { it.fresh && it.accelerationMps2.toArray().all { v -> v.isFinite() } &&
+            it.angularRateRadps.toArray().all { v -> v.isFinite() } && monotonicNanos - it.monotonicNanos in 0..IMU_STALE_NANOS } == true
         val fixStatus = when {
             lastGnss == null -> FixStatus.NO_FIX
             !gnssFresh -> FixStatus.STALE
@@ -345,7 +371,9 @@ class NavigationEngine(
         if (!positionAided) flags = flags or QualityFlag.DEGRADED or QualityFlag.DEAD_RECKONING
         if (positionAided) flags = flags or QualityFlag.GNSS_POSITION_VALID
         if (velocityAided) flags = flags or QualityFlag.GNSS_HORIZONTAL_VELOCITY_VALID
-        if (velocityAided && lastGnss?.hasDerivedDownVelocity == true) flags = flags or QualityFlag.GNSS_DOWN_VELOCITY_VALID
+        if (velocityAided && lastGnss?.let { it.hasDerivedDownVelocity && it.velocityNedMps.z.isFinite() } == true) {
+            flags = flags or QualityFlag.GNSS_DOWN_VELOCITY_VALID
+        }
         if (gnssFresh) flags = flags or QualityFlag.GNSS_FRESH
         if (courseAided) flags = flags or QualityFlag.HEADING_COURSE_AIDED
         if (initSource == InitSource.MANUAL) flags = flags or QualityFlag.MANUAL_INITIALIZATION
@@ -356,9 +384,12 @@ class NavigationEngine(
         if (gnssFresh && lastGnssUpdateRejected) flags = flags or QualityFlag.GNSS_UPDATE_REJECTED
         if (gnssFresh && gnssAidingSuspended) flags = flags or QualityFlag.GNSS_AIDING_SUSPENDED
 
-        val positionStd = Vec3(sqrtDiag(POSITION), sqrtDiag(POSITION + 1), sqrtDiag(POSITION + 2))
-        val velocityStd = Vec3(sqrtDiag(VELOCITY), sqrtDiag(VELOCITY + 1), sqrtDiag(VELOCITY + 2))
-        val attitudeStd = Vec3(sqrtDiag(ATTITUDE), sqrtDiag(ATTITUDE + 1), sqrtDiag(ATTITUDE + 2)) * (180.0 / Math.PI)
+        val positionStd = projectedStandardDeviation(covariance, STATE_SIZE, POSITION, ecefToNed)
+        val velocityStd = projectedStandardDeviation(covariance, STATE_SIZE, VELOCITY, ecefToNed)
+        val attitudeStd = projectedStandardDeviation(
+            covariance, STATE_SIZE, ATTITUDE,
+            multiply3(nedRotationToEulerJacobian(Math.toRadians(euler.y), Math.toRadians(euler.z)), ecefToNed),
+        ) * (180.0 / Math.PI)
         return NavigationSolution(
             monotonicNanos = monotonicNanos,
             unixMillis = unixMillis,
@@ -386,12 +417,8 @@ class NavigationEngine(
         val f = DoubleArray(STATE_SIZE * STATE_SIZE)
         for (i in 0..2) f[index(POSITION + i, VELOCITY + i)] = 1.0
         val r = bodyToEcef.toMatrix()
-        val skew = doubleArrayOf(
-            0.0, -specificForceBody.z, specificForceBody.y,
-            specificForceBody.z, 0.0, -specificForceBody.x,
-            -specificForceBody.y, specificForceBody.x, 0.0,
-        )
-        val attitudeCoupling = multiply3(r, skew)
+        // applyError injects a LEFT ECEF attitude error: dv/dtheta = -[C f]x.
+        val attitudeCoupling = ecefSpecificForceSkew(r, specificForceBody)
         for (row in 0..2) for (col in 0..2) {
             f[index(VELOCITY + row, ATTITUDE + col)] = -attitudeCoupling[row * 3 + col]
             f[index(VELOCITY + row, ACCEL_BIAS + col)] = -r[row * 3 + col]
@@ -420,7 +447,8 @@ class NavigationEngine(
             val measurementState = stateOffset + axis
             val variance = noiseStd[axis] * noiseStd[axis]
             val innovationVariance = covariance[index(measurementState, measurementState)] + variance
-            if (residuals[axis] * residuals[axis] > gateSigma * gateSigma * innovationVariance) continue
+            if (!residuals[axis].isFinite() || !innovationVariance.isFinite() || innovationVariance <= 0.0 ||
+                residuals[axis] * residuals[axis] > gateSigma * gateSigma * innovationVariance) continue
             val gain = DoubleArray(STATE_SIZE) { covariance[index(it, measurementState)] / innovationVariance }
             val correction = DoubleArray(STATE_SIZE) { gain[it] * residuals[axis] }
             val oldRow = DoubleArray(STATE_SIZE) { covariance[index(measurementState, it)] }
@@ -428,6 +456,7 @@ class NavigationEngine(
                 covariance[index(row, col)] -= gain[row] * oldRow[col]
             }
             applyError(correction)
+            for (remaining in axis + 1..2) residuals[remaining] -= correction[stateOffset + remaining]
             acceptedMask = acceptedMask or (1 shl axis)
         }
         symmetrizeCovariance()
@@ -442,17 +471,20 @@ class NavigationEngine(
         noiseStd: DoubleArray,
         gateSigma: Double = 6.0,
         correctAttitude: Boolean = true,
+        axisMask: Int = 7,
     ): Int {
         val residuals = residualNed.toArray()
         var acceptedMask = 0
         for (axis in 0..2) {
+            if (axisMask and (1 shl axis) == 0) continue
             val h = DoubleArray(STATE_SIZE)
             for (component in 0..2) h[stateOffset + component] = ecefToNed[axis * 3 + component]
             var innovationVariance = noiseStd[axis] * noiseStd[axis]
             for (row in 0 until STATE_SIZE) for (col in 0 until STATE_SIZE) {
                 innovationVariance += h[row] * covariance[index(row, col)] * h[col]
             }
-            if (residuals[axis] * residuals[axis] > gateSigma * gateSigma * innovationVariance) continue
+            if (!residuals[axis].isFinite() || !innovationVariance.isFinite() || innovationVariance <= 0.0 ||
+                residuals[axis] * residuals[axis] > gateSigma * gateSigma * innovationVariance) continue
             val gain = DoubleArray(STATE_SIZE)
             for (row in 0 until STATE_SIZE) for (col in 0 until STATE_SIZE) {
                 gain[row] += covariance[index(row, col)] * h[col] / innovationVariance
@@ -463,9 +495,18 @@ class NavigationEngine(
                 projectedCovariance[col] += h[row] * covariance[index(row, col)]
             }
             for (row in 0 until STATE_SIZE) for (col in 0 until STATE_SIZE) {
-                covariance[index(row, col)] -= gain[row] * projectedCovariance[col]
+                // Joseph form expanded for a scalar observation. Unlike P-KHP,
+                // this remains valid when attitude gain entries are suppressed.
+                covariance[index(row, col)] += -gain[row] * projectedCovariance[col] -
+                    projectedCovariance[row] * gain[col] + gain[row] * innovationVariance * gain[col]
             }
-            applyError(DoubleArray(STATE_SIZE) { gain[it] * residuals[axis] })
+            val correction = DoubleArray(STATE_SIZE) { gain[it] * residuals[axis] }
+            applyError(correction)
+            for (remaining in axis + 1..2) {
+                for (component in 0..2) {
+                    residuals[remaining] -= ecefToNed[remaining * 3 + component] * correction[stateOffset + component]
+                }
+            }
             acceptedMask = acceptedMask or (1 shl axis)
         }
         if (!correctAttitude && acceptedMask != 0) clearAttitudeCrossCovariance()
@@ -718,7 +759,10 @@ class NavigationEngine(
             if (previous.hasAltitude && previous.altitudeEllipsoidM.isFinite()) previous.altitudeEllipsoidM else ecefToGeodetic(positionEcef).altitudeM,
         )
         val previousGeo = ecefToGeodetic(previousPosition)
-        val previousVelocity = multiply3(transpose3(ecefToNedMatrix(previousGeo.latitudeRad, previousGeo.longitudeRad)), previous.velocityNedMps)
+        val previousVelocity = multiply3(
+            transpose3(ecefToNedMatrix(previousGeo.latitudeRad, previousGeo.longitudeRad)),
+            previous.velocityNedMps.copy(z = previous.velocityNedMps.z.takeIf { previous.hasDerivedDownVelocity && it.isFinite() } ?: 0.0),
+        )
         val dt = (fix.monotonicNanos - previous.monotonicNanos) * 1e-9
         return (measuredVelocity - previousVelocity).norm() <= max(2.5, speedNoise * 6.0 + MAX_PLAUSIBLE_GNSS_ACCELERATION_MPS2 * dt)
     }
@@ -813,8 +857,6 @@ class NavigationEngine(
         val std = doubleArrayOf(8.0, 8.0, 12.0, 1.5, 1.5, 2.0, 0.12, 0.12, 0.25, 0.4, 0.4, 0.4, 0.03, 0.03, 0.03)
         for (i in 0 until STATE_SIZE) covariance[index(i, i)] = std[i] * std[i]
     }
-
-    private fun sqrtDiag(stateIndex: Int) = sqrt(covariance[index(stateIndex, stateIndex)].coerceAtLeast(0.0))
 
     private fun symmetrizeCovariance() {
         for (row in 0 until STATE_SIZE) for (col in row + 1 until STATE_SIZE) {

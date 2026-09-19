@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import com.example.phoneins.data.TrialLogSummary
 import com.example.phoneins.navigation.MotionProfile
+import com.example.phoneins.navigation.QualityFlag
 import com.example.phoneins.navigation.Vec3
 import java.io.File
 import java.io.RandomAccessFile
@@ -13,6 +14,7 @@ import java.util.Date
 import java.util.Locale
 
 internal data class CsvReplayRow(
+    val imuFresh: Boolean = true,
     val sequence: Long,
     val monotonicNanos: Long,
     val unixMillis: Long,
@@ -216,6 +218,10 @@ internal class CsvReplayIndex private constructor(
                 }
             }
             return CsvReplayRow(
+                imuFresh = columns["quality_flags"]?.let { column ->
+                    val flags = values.getOrNull(column)?.toIntOrNull() ?: error("Invalid quality_flags at row $rowNumber")
+                    flags and QualityFlag.IMU_HELD == 0
+                } ?: true,
                 sequence = long("sequence"),
                 monotonicNanos = long("monotonic_nanos"),
                 unixMillis = long("unix_millis"),

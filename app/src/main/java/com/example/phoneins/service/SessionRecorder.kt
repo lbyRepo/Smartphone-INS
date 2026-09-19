@@ -2,26 +2,34 @@ package com.example.phoneins.service
 
 import android.content.Context
 import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
 class SessionRecorder(context: Context) {
     private val directory = File(context.filesDir, "sessions").apply { mkdirs() }
-    private var output: BufferedOutputStream? = null
-    val recording get() = output != null
+    @Volatile private var output: AsyncRecordWriter<ByteArray>? = null
+    val recording get() = output?.active == true
+    val error get() = output?.error
+    val droppedRecords get() = output?.droppedRecords ?: 0L
 
     fun start(): String {
         stop()
         val name = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".inslog"
-        output = File(directory, name).outputStream().buffered(64 * 1024)
+        output = AsyncRecordWriter {
+            val stream = File(directory, name).outputStream().buffered(64 * 1024)
+            object : RecordSink<ByteArray> {
+                override fun write(record: ByteArray) = stream.write(record)
+                override fun flush() = stream.flush()
+                override fun close() = stream.close()
+            }
+        }
         return name
     }
 
-    fun append(frame: ByteArray) { output?.write(frame) }
+    fun append(frame: ByteArray) { output?.offer(frame.copyOf()) }
     fun flush() { output?.flush() }
-    fun stop() { runCatching { output?.flush() }; runCatching { output?.close() }; output = null }
+    fun stop() { output?.close() }
     fun sessions(): List<String> = directory.listFiles { file -> file.extension == "inslog" }
         ?.sortedByDescending { it.lastModified() }?.map { it.name } ?: emptyList()
 

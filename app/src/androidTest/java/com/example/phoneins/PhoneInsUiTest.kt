@@ -14,6 +14,9 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -87,19 +90,30 @@ class PhoneInsUiTest {
     }
 
     @Test
+    fun storageFailuresAreVisibleInMorePage() {
+        composeRule.runOnIdle {
+            InsRepository.update { it.copy(loggingError = "Logging failed: Disk full", droppedLogRecords = 12) }
+        }
+        composeRule.onNodeWithTag("nav_settings").performClick()
+        composeRule.onNodeWithText("Logging failed: Disk full").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Dropped log records").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
     fun serviceBadgeReflectsRepositoryState() {
         composeRule.runOnIdle {
             InsRepository.update { it.copy(serviceRunning = true, simulated = true) }
         }
-        composeRule.onNodeWithText("SIMULATED").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Navigation service: simulated").assertIsDisplayed()
         composeRule.runOnIdle {
             InsRepository.update { it.copy(serviceRunning = false, simulated = false) }
         }
-        composeRule.onNodeWithText("STOPPED").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Navigation service: stopped").assertIsDisplayed()
     }
 
     @Test
     fun dashboardContainsInsAndRawGnssPositionMap() {
+        composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("position_map"))
         composeRule.onNodeWithTag("position_map").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Position map with 0 INS history points and 0 raw GNSS history points").fetchSemanticsNode()
         composeRule.onNodeWithText("INS position").performScrollTo().assertIsDisplayed()
@@ -175,6 +189,7 @@ class PhoneInsUiTest {
                 )
             }
         }
+        composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("position_separation"))
         composeRule.onNodeWithTag("position_separation").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("GNSS bound active · within 7.5 m").performScrollTo().assertIsDisplayed()
     }
@@ -197,6 +212,7 @@ class PhoneInsUiTest {
                 )
             }
         }
+        composeRule.onNodeWithTag("dashboard").performScrollToNode(hasText("Origin 1.3521000, 103.8198000"))
         composeRule.onNodeWithText("Origin 1.3521000, 103.8198000").performScrollTo().assertIsDisplayed()
         composeRule.runOnIdle {
             InsRepository.update { state ->

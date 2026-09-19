@@ -11,16 +11,19 @@ import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.Locale
 
-class CsvTrialLogger(private val context: Context) {
+class CsvTrialLogger(private val context: Context, private val asynchronous: Boolean = true) {
     private val directory: File
         get() = trialLogDirectory(context)
 
     @Volatile
     private var writer: BufferedWriter? = null
+    @Volatile private var asyncWriter: AsyncRecordWriter<NavigationSolution>? = null
     private var rowsWritten = 0L
     var currentFile: File? = null
         private set
-    val logging get() = writer != null
+    val logging get() = if (asynchronous) asyncWriter?.active == true else writer != null
+    val error get() = asyncWriter?.error
+    val droppedRecords get() = asyncWriter?.droppedRecords ?: 0L
 
     @Synchronized
     fun start(filePrefix: String = "phoneins_trial"): File {
@@ -28,27 +31,45 @@ class CsvTrialLogger(private val context: Context) {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val safePrefix = filePrefix.replace(Regex("[^A-Za-z0-9._-]+"), "_").take(96).trim('_').ifEmpty { "phoneins_trial" }
         val file = uniqueFile(directory, "${safePrefix}_$stamp", ".csv")
-        writer = file.outputStream().buffered(256 * 1024).writer(Charsets.UTF_8).buffered(256 * 1024)
         currentFile = file
         rowsWritten = 0L
-        writer?.appendLine(HEADER)
+        if (asynchronous) {
+            asyncWriter = AsyncRecordWriter {
+                val out = file.bufferedWriter(Charsets.UTF_8, 256 * 1024)
+                try { out.appendLine(HEADER) } catch (failure: Exception) {
+                    runCatching { out.close() }
+                    throw failure
+                }
+                object : RecordSink<NavigationSolution> {
+                    override fun write(record: NavigationSolution) { out.appendLine(record.toCsvRow()) }
+                    override fun flush() = out.flush()
+                    override fun close() = out.close()
+                }
+            }
+        } else {
+            // Algorithm replay is off the publisher thread: retain lossless,
+            // synchronous output at every recorded epoch, at every replay speed.
+            writer = file.bufferedWriter(Charsets.UTF_8, 256 * 1024)
+            writer?.appendLine(HEADER)
+        }
         return file
     }
 
-    @Synchronized
     fun append(solution: NavigationSolution) {
+        if (asynchronous) { asyncWriter?.offer(solution); return }
         val out = writer ?: return
         out.appendLine(solution.toCsvRow())
         rowsWritten++
     }
 
-    @Synchronized
     fun flush() {
+        if (asynchronous) { asyncWriter?.flush(); return }
         writer?.flush()
     }
 
     @Synchronized
     fun stop() {
+        asyncWriter?.close()
         runCatching { writer?.flush() }
         runCatching { writer?.close() }
         writer = null

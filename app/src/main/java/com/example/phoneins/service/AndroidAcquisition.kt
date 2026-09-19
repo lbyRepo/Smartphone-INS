@@ -25,7 +25,9 @@ class AndroidAcquisition(
     private val locationManager = context.getSystemService(LocationManager::class.java)
     private val thread = HandlerThread("ins-acquisition")
     private lateinit var handler: Handler
-    private var acceleration = Vec3(0.0, 0.0, -9.81)
+    private val imuPairer = ImuSamplePairer()
+    val accelerationTimeNanos get() = imuPairer.accelerationTimeNanos
+    val gyroTimeNanos get() = imuPairer.gyroTimeNanos
     private var satellitesUsed = 0
     private val altitudeHistory = ArrayDeque<Pair<Long, Double>>()
 
@@ -68,8 +70,8 @@ class AndroidAcquisition(
         val native = Vec3(event.values[0].toDouble(), event.values[1].toDouble(), event.values[2].toDouble())
         val body = Vec3(native.y, native.x, -native.z)
         when (event.sensor.type) {
-            Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_ACCELEROMETER_UNCALIBRATED -> acceleration = body
-            Sensor.TYPE_GYROSCOPE, Sensor.TYPE_GYROSCOPE_UNCALIBRATED -> onImu(TimedImuSample(event.timestamp, acceleration, body))
+            Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_ACCELEROMETER_UNCALIBRATED -> imuPairer.accelerometer(event.timestamp, body)
+            Sensor.TYPE_GYROSCOPE, Sensor.TYPE_GYROSCOPE_UNCALIBRATED -> imuPairer.gyroscope(event.timestamp, body)?.let(onImu)
             Sensor.TYPE_MAGNETIC_FIELD, Sensor.TYPE_MAGNETIC_FIELD_UNCALIBRATED -> onMag(MagSample(event.timestamp, body))
         }
     }

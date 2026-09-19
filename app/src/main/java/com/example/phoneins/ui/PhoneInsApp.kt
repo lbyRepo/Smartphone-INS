@@ -156,7 +156,14 @@ private fun ServiceBadge(state: InsUiState, compact: Boolean) {
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         shape = MaterialTheme.shapes.small,
-        modifier = Modifier.padding(end = 12.dp).heightIn(min = 48.dp),
+        modifier = Modifier.padding(end = 12.dp).heightIn(min = 48.dp).semantics {
+            contentDescription = "Navigation service: " + when {
+                !state.serviceRunning -> "stopped"
+                state.csvReplay.selectedLogName != null && state.csvReplay.phase != CsvReplayPhase.IDLE -> "replay"
+                state.simulated -> "simulated"
+                else -> "live"
+            }
+        },
     ) {
         Box(Modifier.padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
             Text(text, fontSize = 14.sp, maxLines = 1)
@@ -668,6 +675,8 @@ internal fun RawDataScreen(state: InsUiState) {
                 Metric("Gx / Gy / Gz", imu?.angularRateRadps?.f3(5) ?: "—", "rad/s"),
                 Metric("Sample age", imu?.let { ((state.solution.monotonicNanos - it.monotonicNanos).coerceAtLeast(0L) / 1e6).f(1) } ?: "—", "ms"),
                 Metric("Freshness", if (state.solution.qualityFlags and QualityFlag.IMU_FRESH != 0) "FRESH" else "HELD", "quality"),
+                Metric("Accelerometer age", state.accelerometerAgeMs?.f(1) ?: "—", "ms · live only"),
+                Metric("Gyroscope age", state.gyroscopeAgeMs?.f(1) ?: "—", "ms · live only"),
             ))
         }
         item { SectionTitle("Raw magnetometer · body FRD") }
@@ -856,6 +865,8 @@ internal fun SessionsScreen(
         KeyValueRow("Android accessory", if (state.aoaConnected) "Connected" else "Not connected")
         KeyValueRow("Protocol", "INS1 · 224-byte binary · CRC-32")
         KeyValueRow("CSV trial logging", if (state.csvLoggingEnabled) "Enabled by default" else "Stopped")
+        state.loggingError?.let { KeyValueRow("Logging error", it) }
+        KeyValueRow("Dropped log records", state.droppedLogRecords.toString())
         KeyValueRow("CSV log file", state.csvLogFileName ?: "Start service to create a dated CSV")
         state.csvLogPath?.let { path ->
             Text(

@@ -15,8 +15,8 @@ android {
         applicationId = "com.example.phoneins"
         minSdk = 33
         targetSdk = 36
-        versionCode = 10
-        versionName = "0.3.6"
+        versionCode = 11
+        versionName = "0.3.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
@@ -61,6 +61,9 @@ kotlin {
 dependencies {
     implementation(project(":navigation"))
     implementation(project(":protocol"))
+
+    // Street-map basemap behind the position plot (online raster tiles with disk cache).
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
 
     val composeBom = platform("androidx.compose:compose-bom:2025.06.01")
     implementation(composeBom)

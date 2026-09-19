@@ -16,6 +16,7 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 - Foreground navigation service for continued sensor processing.
 - Raw accelerometer, gyroscope, magnetometer, and GNSS display.
 - WGS84 position, NED velocity, Euler attitude, bias, uncertainty, timing, and quality-state display.
+- Position map with a street-map basemap (cached online raster tiles, © OpenStreetMap/CARTO) or a plain grid, INS/GNSS trails, heading arrow, and scale bar.
 - Automatic initialization with a 15-second stationary window using gravity for coarse roll/pitch alignment.
 - Manual initialization with user-entered WGS84 coordinates and Euler angles.
 - Heading strategy that avoids continuous magnetometer dependence:
@@ -30,7 +31,7 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 
 ## Project status
 
-Current app version: `0.3.6`.
+Current app version: `0.3.7`.
 
 This is an engineering demonstrator, not a certified navigation product. The emulator and replay tests validate app behavior, UI state transitions, protocol handling, logging, and deterministic scenarios. Actual sensor quality, thermal behavior, sustained rates, USB behavior, and navigation performance must be validated on physical phones and real routes.
 
@@ -190,8 +191,8 @@ See:
 Typical TCP receiver workflow:
 
 ```bash
-adb forward tcp:28500 tcp:28500
-python3 tools/receiver/phone_ins_receiver.py --host 127.0.0.1 --port 28500 --csv out.csv
+adb forward tcp:29500 tcp:29500
+python3 tools/receiver/phone_ins_receiver.py --tcp 127.0.0.1:29500 --csv out.csv
 ```
 
 ## Testing

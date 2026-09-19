@@ -1,5 +1,6 @@
 package com.example.phoneins.ui
 
+import android.content.Context
 import android.content.res.Configuration
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.Canvas
@@ -17,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -36,11 +38,13 @@ import com.example.phoneins.data.InsUiState
 import com.example.phoneins.data.CsvReplayPhase
 import com.example.phoneins.navigation.*
 import com.example.phoneins.service.NavigationService
+import org.osmdroid.util.GeoPoint
 import java.util.Locale
 import java.util.Date
 import java.text.SimpleDateFormat
 import kotlin.math.cos
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 private val LightColors = lightColorScheme(
     primary = androidx.compose.ui.graphics.Color(0xFF006A65),
@@ -63,6 +67,36 @@ internal enum class Destination(val label: String, val glyph: String) {
     DASHBOARD("INS", "◎"), RAW("Raw", "≋"), INITIALIZE("Init", "⌖"), SETTINGS("More", "⚙")
 }
 
+/** Basemap shown behind the position plot: cached online street tiles, or the plain grid. */
+internal enum class MapBasemap(val label: String) {
+    TILES("Street map"),
+    GRID("Grid"),
+}
+
+private const val UI_PREFS = "phoneins_ui"
+private const val KEY_MAP_BASEMAP = "map_basemap"
+
+internal fun readStoredMapBasemap(context: Context): MapBasemap =
+    runCatching {
+        context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_MAP_BASEMAP, null)
+            ?.let { stored -> MapBasemap.entries.firstOrNull { it.name == stored } }
+    }.getOrNull() ?: MapBasemap.TILES
+
+internal fun storeMapBasemap(context: Context, basemap: MapBasemap) {
+    runCatching {
+        context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_MAP_BASEMAP, basemap.name)
+            .apply()
+    }
+}
+
+internal fun clearStoredMapBasemap(context: Context) {
+    runCatching {
+        context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).edit().remove(KEY_MAP_BASEMAP).commit()
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PhoneInsApp(
@@ -71,7 +105,19 @@ fun PhoneInsApp(
 ) {
     val state by InsRepository.state.collectAsStateWithLifecycle()
     var destination by rememberSaveable { mutableStateOf(Destination.DASHBOARD) }
-    PhoneInsScaffold(state, destination, { destination = it }, sendAction, chooseCsv)
+    val context = LocalContext.current
+    var mapBasemap by rememberSaveable { mutableStateOf(readStoredMapBasemap(context)) }
+    PhoneInsScaffold(
+        state,
+        destination,
+        { destination = it },
+        sendAction,
+        chooseCsv,
+        mapBasemap,
+    ) { basemap ->
+        mapBasemap = basemap
+        storeMapBasemap(context, basemap)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -82,6 +128,8 @@ internal fun PhoneInsScaffold(
     selectDestination: (Destination) -> Unit,
     sendAction: (String, Map<String, Any>) -> Unit,
     chooseCsv: () -> Unit = {},
+    mapBasemap: MapBasemap = MapBasemap.TILES,
+    onMapBasemapChange: (MapBasemap) -> Unit = {},
 ) {
     val wide = LocalConfiguration.current.screenWidthDp >= 700
     val fontScale = LocalDensity.current.fontScale
@@ -135,7 +183,7 @@ internal fun PhoneInsScaffold(
             }
             Box(Modifier.weight(1f).fillMaxHeight()) {
                 when (destination) {
-                    Destination.DASHBOARD -> DashboardScreen(state, positionMapState, sendAction)
+                    Destination.DASHBOARD -> DashboardScreen(state, positionMapState, sendAction, mapBasemap, onMapBasemapChange)
                     Destination.RAW -> RawDataScreen(state)
                     Destination.INITIALIZE -> InitializationScreen(state, sendAction)
                     Destination.SETTINGS -> SessionsScreen(state, sendAction, chooseCsv)
@@ -180,7 +228,8 @@ internal fun DashboardScreen(
     LaunchedEffect(state.solution.sequence, state.solution.initialized, state.solution.latestGnss?.monotonicNanos) {
         positionMapState.update(state.solution)
     }
-    DashboardScreen(state, positionMapState, sendAction)
+    // Static previews and direct-call UI tests stay on the deterministic grid renderer.
+    DashboardScreen(state, positionMapState, sendAction, MapBasemap.GRID) {}
 }
 
 @Composable
@@ -188,6 +237,8 @@ private fun DashboardScreen(
     state: InsUiState,
     positionMapState: PositionMapState,
     sendAction: (String, Map<String, Any>) -> Unit,
+    mapBasemap: MapBasemap,
+    onMapBasemapChange: (MapBasemap) -> Unit,
 ) {
     val solution = state.solution
     LazyColumn(
@@ -205,7 +256,7 @@ private fun DashboardScreen(
             GnssOutageControl(state, sendAction)
         }
         item {
-            PositionMapCard(solution, positionMapState)
+            PositionMapCard(solution, positionMapState, mapBasemap, onMapBasemapChange)
         }
         item {
             SectionTitle("INS solution")
@@ -278,6 +329,26 @@ private fun InitializationStatusCard(state: InsUiState) {
         inProgress -> MaterialTheme.colorScheme.tertiaryContainer
         else -> MaterialTheme.colorScheme.surfaceVariant
     }
+    if (complete) {
+        // Once navigation is running the live state lives in the status banner; keep this card to
+        // a compact confirmation row so the dashboard leads with actionable content.
+        Card(
+            colors = CardDefaults.cardColors(containerColor = container),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("initialization_status")
+                .semantics { contentDescription = title },
+        ) {
+            Column(
+                Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(detail, fontSize = 14.sp)
+            }
+        }
+        return
+    }
     Card(
         colors = CardDefaults.cardColors(containerColor = container),
         modifier = Modifier
@@ -302,16 +373,7 @@ private fun InitializationStatusCard(state: InsUiState) {
             }
             Text(detail, fontSize = 14.sp)
             if (inProgress) {
-                LinearProgressIndicator(
-                    progress = { state.initializationProgress.coerceIn(0f, 1f) },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 8.dp),
-                )
-                Text(
-                    "${state.initializationElapsedSeconds.coerceAtMost(state.initializationDurationSeconds).f(1)} / ${state.initializationDurationSeconds.f(1)} s",
-                    fontSize = 14.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.testTag("initialization_progress_text"),
-                )
+                InitializationProgressContent(state, "initialization_progress_text")
             }
             if (state.coarseRollDeg.isFinite() && state.coarsePitchDeg.isFinite() && !complete) {
                 Text(
@@ -326,6 +388,21 @@ private fun InitializationStatusCard(state: InsUiState) {
             }
         }
     }
+}
+
+/** Shared 15-second countdown display used by the Dashboard card and the Init screen. */
+@Composable
+private fun InitializationProgressContent(state: InsUiState, textTag: String) {
+    LinearProgressIndicator(
+        progress = { state.initializationProgress.coerceIn(0f, 1f) },
+        modifier = Modifier.fillMaxWidth().heightIn(min = 8.dp),
+    )
+    Text(
+        "${state.initializationElapsedSeconds.coerceAtMost(state.initializationDurationSeconds).f(1)} / ${state.initializationDurationSeconds.f(1)} s",
+        fontSize = 14.sp,
+        fontFamily = FontFamily.Monospace,
+        modifier = Modifier.testTag(textTag),
+    )
 }
 
 @Composable
@@ -416,10 +493,17 @@ private fun GnssOutageControl(
 
 internal data class TrailPoint(val monotonicNanos: Long, val latitudeDeg: Double, val longitudeDeg: Double)
 
+/** Upper bound on plotted history per trail; longer sessions drop the oldest points. */
+internal const val MAX_TRAIL_POINTS = 2_000
+
 internal class PositionMapState {
     val insTrail = mutableStateListOf<TrailPoint>()
     val gnssTrail = mutableStateListOf<TrailPoint>()
     var origin by mutableStateOf<TrailPoint?>(null)
+        private set
+
+    /** Bumped whenever plotted trail contents change, so the UI re-derives snapshots only on change. */
+    var version by mutableLongStateOf(0L)
         private set
     private var lastSequence: Long? = null
 
@@ -441,20 +525,45 @@ internal class PositionMapState {
         lastSequence = solution.sequence
     }
 
+    private fun appendTrail(trail: MutableList<TrailPoint>, point: TrailPoint) {
+        val previous = trail.lastOrNull()
+        val elapsed = previous?.let { point.monotonicNanos - it.monotonicNanos } ?: Long.MAX_VALUE
+        val distance = previous?.let { point.toLocalMetres(it).let { local -> kotlin.math.hypot(local.x, local.y) } } ?: Double.POSITIVE_INFINITY
+        if (previous == null || elapsed >= 1_000_000_000L || (elapsed >= 100_000_000L && distance >= 1.0)) {
+            trail += point
+            while (trail.size > MAX_TRAIL_POINTS) trail.removeAt(0)
+            version++
+        }
+    }
+
     private fun clear() {
+        val hadContent = insTrail.isNotEmpty() || gnssTrail.isNotEmpty() || origin != null
         insTrail.clear()
         gnssTrail.clear()
         origin = null
         lastSequence = null
+        if (hadContent) version++
     }
 }
 
+/** Local-metre geometry for the grid renderer, derived only when plotted history changes. */
+private data class MapGeometry(
+    val centreNorthMetres: Double,
+    val centreEastMetres: Double,
+    val halfSpanMetres: Double,
+    val insLocal: List<Vec3>,
+    val gnssLocal: List<Vec3>,
+)
+
 @Composable
-internal fun PositionMapCard(solution: NavigationSolution, mapState: PositionMapState) {
+internal fun PositionMapCard(
+    solution: NavigationSolution,
+    mapState: PositionMapState,
+    basemap: MapBasemap = MapBasemap.TILES,
+    onBasemapChange: (MapBasemap) -> Unit = {},
+) {
     // Draw immutable snapshots. Passing SnapshotStateList directly into Canvas can leave the draw
     // phase observing the original list contents even while the surrounding text recomposes.
-    val insTrail = mapState.insTrail.toList()
-    val gnssTrail = mapState.gnssTrail.toList()
     val insValid = solution.initialized && solution.latitudeDeg.isFinite() && solution.longitudeDeg.isFinite()
     val gnss = solution.latestGnss
     val gnssValid = gnss != null && gnss.latitudeDeg.isFinite() && gnss.longitudeDeg.isFinite()
@@ -467,80 +576,167 @@ internal fun PositionMapCard(solution: NavigationSolution, mapState: PositionMap
     }
     val gnssBoundMetres = gnss?.horizontalAccuracyM?.takeIf { it.isFinite() }?.let { max(2.0, 3.0 * it) }
     val positionAided = solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0
+    val headingDeg = if (solution.initialized) solution.eulerDeg.z else Double.NaN
+    val headingKey = if (headingDeg.isFinite()) headingDeg.roundToInt() else Int.MIN_VALUE
+
+    // Trail snapshots and grid geometry are keyed on the map state version so the 10 Hz UI stream
+    // re-derives them only when a trail point was appended or cleared, not on every solution tick.
+    val trailVersion = mapState.version
+    val insTrail = remember(trailVersion) { mapState.insTrail.toList() }
+    val gnssTrail = remember(trailVersion) { mapState.gnssTrail.toList() }
+    val hasOrigin = mapState.origin != null || insTrail.isNotEmpty() || gnssTrail.isNotEmpty() ||
+        currentIns != null || currentGnss != null
+    val geometry = remember(trailVersion) {
+        val reference = mapState.origin ?: insTrail.firstOrNull() ?: gnssTrail.firstOrNull()
+        val insLocal = reference?.let { origin -> insTrail.map { it.toLocalMetres(origin) } }.orEmpty()
+        val gnssLocal = reference?.let { origin -> gnssTrail.map { it.toLocalMetres(origin) } }.orEmpty()
+        val localPoints = buildList {
+            add(Vec3.ZERO)
+            addAll(insLocal)
+            addAll(gnssLocal)
+        }
+        val northMin = localPoints.minOfOrNull { it.x } ?: 0.0
+        val northMax = localPoints.maxOfOrNull { it.x } ?: 0.0
+        val eastMin = localPoints.minOfOrNull { it.y } ?: 0.0
+        val eastMax = localPoints.maxOfOrNull { it.y } ?: 0.0
+        val requiredHalfSpan = max((northMax - northMin) * 0.5, (eastMax - eastMin) * 0.5)
+        MapGeometry(
+            centreNorthMetres = (northMin + northMax) * 0.5,
+            centreEastMetres = (eastMin + eastMax) * 0.5,
+            halfSpanMetres = niceMapSpan(max(10.0, requiredHalfSpan * 1.12)),
+            insLocal = insLocal,
+            gnssLocal = gnssLocal,
+        )
+    }
+    val insDisplacementMetres = geometry.insLocal.lastOrNull()?.norm()
 
     val insColor = MaterialTheme.colorScheme.primary
     val gnssColor = MaterialTheme.colorScheme.tertiary
     val backgroundColor = MaterialTheme.colorScheme.surfaceVariant
     val arrowColor = MaterialTheme.colorScheme.onSurface
     val gridColor = arrowColor.copy(alpha = 0.16f)
-    val allPoints = buildList {
-        mapState.origin?.let(::add)
-        addAll(insTrail)
-        addAll(gnssTrail)
-    }.ifEmpty {
-        buildList {
-            currentIns?.let(::add)
-            currentGnss?.let(::add)
-        }
+    val plotPalette = PositionPlotPalette(
+        background = backgroundColor.toArgb(),
+        grid = gridColor.toArgb(),
+        foreground = arrowColor.toArgb(),
+        ins = insColor.toArgb(),
+        gnss = gnssColor.toArgb(),
+    )
+    val tilePalette = MapBasemapPalette(
+        ins = insColor.toArgb(),
+        gnss = gnssColor.toArgb(),
+        foreground = arrowColor.toArgb(),
+        background = backgroundColor.toArgb(),
+    )
+    val plotData = remember(geometry, hasOrigin, headingKey) {
+        PositionPlotData(
+            insLocalMetres = geometry.insLocal,
+            gnssLocalMetres = geometry.gnssLocal,
+            centreNorthMetres = geometry.centreNorthMetres,
+            centreEastMetres = geometry.centreEastMetres,
+            halfSpanMetres = geometry.halfSpanMetres,
+            hasOrigin = hasOrigin,
+            insHeadingDeg = headingDeg,
+        )
     }
-    val reference = mapState.origin ?: allPoints.firstOrNull()
-    val insLocal = reference?.let { origin -> insTrail.map { it.toLocalMetres(origin) } }.orEmpty()
-    val gnssLocal = reference?.let { origin -> gnssTrail.map { it.toLocalMetres(origin) } }.orEmpty()
-    val localPoints = buildList {
-        add(Vec3.ZERO)
-        addAll(insLocal)
-        addAll(gnssLocal)
+
+    var mapUserNavigated by remember { mutableStateOf(false) }
+    var recenterEpoch by remember { mutableIntStateOf(0) }
+    val tileData = remember(trailVersion, headingKey, recenterEpoch) {
+        MapBasemapData(
+            insPoints = insTrail.map { GeoPoint(it.latitudeDeg, it.longitudeDeg) },
+            gnssPoints = gnssTrail.map { GeoPoint(it.latitudeDeg, it.longitudeDeg) },
+            origin = mapState.origin?.let { GeoPoint(it.latitudeDeg, it.longitudeDeg) },
+            insHeadingDeg = headingDeg,
+            recenterEpoch = recenterEpoch,
+        )
     }
-    val northMin = localPoints.minOfOrNull { it.x } ?: 0.0
-    val northMax = localPoints.maxOfOrNull { it.x } ?: 0.0
-    val eastMin = localPoints.minOfOrNull { it.y } ?: 0.0
-    val eastMax = localPoints.maxOfOrNull { it.y } ?: 0.0
-    val centreNorth = (northMin + northMax) * 0.5
-    val centreEast = (eastMin + eastMax) * 0.5
-    val requiredHalfSpan = max((northMax - northMin) * 0.5, (eastMax - eastMin) * 0.5)
-    val halfSpanMetres = niceMapSpan(max(10.0, requiredHalfSpan * 1.12))
-    val insDisplacementMetres = insLocal.lastOrNull()?.norm()
+    val dark = (LocalConfiguration.current.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+    val mapDescription = "Position map with ${insTrail.size} INS history points and ${gnssTrail.size} raw GNSS history points" +
+        (if (basemap == MapBasemap.TILES) " · street map" else " · grid")
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             SectionTitle("Position map")
             Spacer(Modifier.weight(1f))
-            Text("±${halfSpanMetres.f(0)} m", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (basemap == MapBasemap.TILES && mapUserNavigated) {
+                FilledTonalButton(
+                    onClick = {
+                        recenterEpoch++
+                        mapUserNavigated = false
+                    },
+                    modifier = Modifier
+                        .heightIn(min = 40.dp)
+                        .testTag("map_recenter")
+                        .semantics { contentDescription = "Recenter map" },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                ) { Text("Recenter", fontSize = 13.sp) }
+            } else if (basemap == MapBasemap.GRID) {
+                Text("±${geometry.halfSpanMetres.f(0)} m", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            SegmentedButton(
+                selected = basemap == MapBasemap.TILES,
+                onClick = { onBasemapChange(MapBasemap.TILES) },
+                shape = SegmentedButtonDefaults.itemShape(0, 2),
+                modifier = Modifier.heightIn(min = 48.dp).testTag("map_mode_tiles"),
+            ) { Text(MapBasemap.TILES.label, fontSize = 14.sp) }
+            SegmentedButton(
+                selected = basemap == MapBasemap.GRID,
+                onClick = {
+                    mapUserNavigated = false
+                    onBasemapChange(MapBasemap.GRID)
+                },
+                shape = SegmentedButtonDefaults.itemShape(1, 2),
+                modifier = Modifier.heightIn(min = 48.dp).testTag("map_mode_grid"),
+            ) { Text(MapBasemap.GRID.label, fontSize = 14.sp) }
         }
         Card(Modifier.fillMaxWidth().testTag("position_map")) {
-            AndroidView(
-                factory = { PositionPlotView(it) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 240.dp)
-                    .testTag("position_map_canvas")
-                    .semantics {
-                        contentDescription = "Position map with ${insTrail.size} INS history points and ${gnssTrail.size} raw GNSS history points"
-                    },
-                update = { view ->
-                    view.render(
-                        PositionPlotData(
-                            insLocalMetres = insLocal,
-                            gnssLocalMetres = gnssLocal,
-                            centreNorthMetres = centreNorth,
-                            centreEastMetres = centreEast,
-                            halfSpanMetres = halfSpanMetres,
-                            hasOrigin = reference != null,
-                        ),
-                        PositionPlotPalette(
-                            background = backgroundColor.toArgb(),
-                            grid = gridColor.toArgb(),
-                            foreground = arrowColor.toArgb(),
-                            ins = insColor.toArgb(),
-                            gnss = gnssColor.toArgb(),
-                        ),
+            if (basemap == MapBasemap.TILES) {
+                key(dark) {
+                    AndroidView(
+                        factory = { context ->
+                            // Configure the tile cache location and user agent before the first
+                            // MapView exists: its super constructor opens the cache database.
+                            MapBasemapView.configureBeforeFirstMapView(context)
+                            MapBasemapView(context, dark).apply {
+                                onUserNavigation = { mapUserNavigated = true }
+                                onResume()
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 240.dp)
+                            .testTag("position_map_canvas")
+                            .semantics { contentDescription = mapDescription },
+                        onRelease = { it.onPause() },
+                        update = { view -> view.render(tileData, tilePalette) },
                     )
-                },
-            )
+                }
+            } else {
+                AndroidView(
+                    factory = { PositionPlotView(it) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 240.dp)
+                        .testTag("position_map_canvas")
+                        .semantics { contentDescription = mapDescription },
+                    update = { view -> view.render(plotData, plotPalette) },
+                )
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
             MapLegend(insColor, "INS position", filled = true)
             MapLegend(gnssColor, "Raw GNSS", filled = false)
+        }
+        if (basemap == MapBasemap.TILES) {
+            Text(
+                "Basemap © OpenStreetMap contributors · © CARTO · tiles cached on device",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("map_attribution"),
+            )
         }
         mapState.origin?.let { origin ->
             Text(
@@ -599,15 +795,6 @@ private fun MapLegend(color: Color, label: String, filled: Boolean) {
             if (filled) drawCircle(color, size.minDimension / 2) else drawCircle(color, size.minDimension / 2 - 1.dp.toPx(), style = Stroke(2.dp.toPx()))
         }
         Text(label, fontSize = 14.sp)
-    }
-}
-
-private fun appendTrail(trail: MutableList<TrailPoint>, point: TrailPoint) {
-    val previous = trail.lastOrNull()
-    val elapsed = previous?.let { point.monotonicNanos - it.monotonicNanos } ?: Long.MAX_VALUE
-    val distance = previous?.let { point.toLocalMetres(it).let { local -> kotlin.math.hypot(local.x, local.y) } } ?: Double.POSITIVE_INFINITY
-    if (previous == null || elapsed >= 1_000_000_000L || (elapsed >= 100_000_000L && distance >= 1.0)) {
-        trail += point
     }
 }
 
@@ -753,6 +940,16 @@ internal fun InitializationScreen(state: InsUiState, sendAction: (String, Map<St
                 enabled = state.serviceRunning,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("initialize_auto"),
             ) { Text("Begin automatic initialization", fontSize = 14.sp) }
+            if (state.initializationInProgress && !state.solution.initialized) {
+                // Mirror the dashboard countdown here so the user does not have to
+                // navigate back to see alignment progress after pressing the button.
+                Card(Modifier.fillMaxWidth().testTag("init_screen_progress")) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Initialization in progress", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        InitializationProgressContent(state, "init_screen_progress_text")
+                    }
+                }
+            }
         } else {
             ManualField("Latitude", latitude, { latitude = it }, "degrees", "manual_latitude")
             ManualField("Longitude", longitude, { longitude = it }, "degrees", "manual_longitude")

@@ -29,7 +29,9 @@ private annotation class PrimaryScreenMatrix
 @Composable
 private fun PreviewApp(destination: Destination) {
     PhoneInsTheme {
-        PhoneInsScaffold(previewState(), destination, {}, { _, _ -> })
+        // Screenshot baselines stay on the deterministic grid renderer: street tiles would
+        // introduce network-dependent pixels into the acceptance matrix.
+        PhoneInsScaffold(previewState(), destination, {}, { _, _ -> }, {}, MapBasemap.GRID) {}
     }
 }
 

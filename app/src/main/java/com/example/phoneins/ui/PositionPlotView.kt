@@ -8,6 +8,8 @@ import android.graphics.Path
 import android.view.View
 import com.example.phoneins.navigation.Vec3
 import kotlin.math.min
+import kotlin.math.sin
+import kotlin.math.cos
 
 /** Immutable plot input. Replacing this value always invalidates the Android drawing surface. */
 internal data class PositionPlotData(
@@ -17,6 +19,7 @@ internal data class PositionPlotData(
     val centreEastMetres: Double,
     val halfSpanMetres: Double,
     val hasOrigin: Boolean,
+    val insHeadingDeg: Double = Double.NaN,
 )
 
 internal data class PositionPlotPalette(
@@ -30,6 +33,7 @@ internal data class PositionPlotPalette(
 /**
  * A deliberately small native plotter. Compose owns the immutable history snapshot while this
  * view owns draw invalidation, avoiding stale Canvas display lists during rapid navigation updates.
+ * [render] is change-gated so a 10 Hz UI stream only redraws when the plotted data changed.
  */
 internal class PositionPlotView(context: Context) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -38,6 +42,7 @@ internal class PositionPlotView(context: Context) : View(context) {
     private var palette = PositionPlotPalette(0, 0, 0, 0, 0)
 
     fun render(data: PositionPlotData, palette: PositionPlotPalette) {
+        if (data == this.data && palette == this.palette) return
         this.data = data
         this.palette = palette
         invalidate()
@@ -120,7 +125,28 @@ internal class PositionPlotView(context: Context) : View(context) {
             paint.color = android.graphics.Color.WHITE
             canvas.drawLine(x - 5f * density, y, x + 5f * density, y, paint)
             canvas.drawLine(x, y - 5f * density, x, y + 5f * density, paint)
+            if (data.insHeadingDeg.isFinite()) {
+                val rad = Math.toRadians(data.insHeadingDeg)
+                val dx = sin(rad).toFloat()
+                val dy = -cos(rad).toFloat()
+                val startX = x + dx * 12f * density
+                val startY = y + dy * 12f * density
+                val tipX = x + dx * 22f * density
+                val tipY = y + dy * 22f * density
+                paint.color = palette.foreground
+                paint.strokeWidth = 2.5f * density
+                paint.strokeCap = Paint.Cap.ROUND
+                canvas.drawLine(startX, startY, tipX, tipY, paint)
+                val backX = -dx * 6f * density
+                val backY = -dy * 6f * density
+                val sideX = -dy * 3.6f * density
+                val sideY = dx * 3.6f * density
+                canvas.drawLine(tipX, tipY, tipX + backX + sideX, tipY + backY + sideY, paint)
+                canvas.drawLine(tipX, tipY, tipX + backX - sideX, tipY + backY - sideY, paint)
+            }
         }
+
+        drawScaleBar(canvas, pixelsPerMetre, density)
 
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = 2f * density
@@ -131,5 +157,29 @@ internal class PositionPlotView(context: Context) : View(context) {
         canvas.drawLine(arrowX, 34f * density, arrowX, arrowTop, paint)
         canvas.drawLine(arrowX, arrowTop, arrowX - 6f * density, 22f * density, paint)
         canvas.drawLine(arrowX, arrowTop, arrowX + 6f * density, 22f * density, paint)
+    }
+
+    /** Graphical scale reference bottom-left, choosing a round metre length that fits nicely. */
+    private fun drawScaleBar(canvas: Canvas, pixelsPerMetre: Float, density: Float) {
+        val minLengthPx = 48f * density
+        val maxLengthPx = 130f * density
+        val candidateMetres = listOf(500.0, 250.0, 200.0, 100.0, 50.0, 25.0, 20.0, 10.0, 5.0, 2.0, 1.0)
+        val metres = candidateMetres.firstOrNull { (it * pixelsPerMetre) >= minLengthPx } ?: return
+        val lengthPx = (metres * pixelsPerMetre).toFloat()
+        if (lengthPx > maxLengthPx) return
+        val left = 12f * density
+        val bottom = height - 12f * density
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 2f * density
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.pathEffect = null
+        paint.color = palette.foreground
+        canvas.drawLine(left, bottom, left + lengthPx, bottom, paint)
+        canvas.drawLine(left, bottom - 4f * density, left, bottom + 4f * density, paint)
+        canvas.drawLine(left + lengthPx, bottom - 4f * density, left + lengthPx, bottom + 4f * density, paint)
+        val label = if (metres >= 1.0) "${metres.toInt()} m" else "1 m"
+        paint.style = Paint.Style.FILL
+        paint.textSize = 10f * density
+        canvas.drawText(label, left, bottom - 8f * density, paint)
     }
 }

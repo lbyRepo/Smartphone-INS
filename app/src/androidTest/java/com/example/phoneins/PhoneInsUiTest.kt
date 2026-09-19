@@ -35,6 +35,7 @@ import com.example.phoneins.ui.PositionMapState
 import com.example.phoneins.ui.PositionPlotData
 import com.example.phoneins.ui.PositionPlotPalette
 import com.example.phoneins.ui.PositionPlotView
+import com.example.phoneins.ui.clearStoredMapBasemap
 import com.example.phoneins.ui.toLocalMetresForTest
 import org.junit.After
 import org.junit.Rule
@@ -115,9 +116,21 @@ class PhoneInsUiTest {
     fun dashboardContainsInsAndRawGnssPositionMap() {
         composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("position_map"))
         composeRule.onNodeWithTag("position_map").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Position map with 0 INS history points and 0 raw GNSS history points").fetchSemanticsNode()
+        composeRule.onNodeWithContentDescription("Position map with 0 INS history points and 0 raw GNSS history points · street map").fetchSemanticsNode()
         composeRule.onNodeWithText("INS position").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Raw GNSS").assertIsDisplayed()
+    }
+
+    @Test
+    fun positionMapBasemapToggleSwitchesStreetMapAndGridModes() {
+        composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("map_mode_tiles"))
+        composeRule.onNodeWithContentDescription("Position map with 0 INS history points and 0 raw GNSS history points · street map").assertExists()
+        composeRule.onNodeWithTag("map_mode_grid").performClick()
+        composeRule.onNodeWithContentDescription("Position map with 0 INS history points and 0 raw GNSS history points · grid").assertExists()
+        composeRule.onNodeWithTag("map_mode_tiles").performClick()
+        composeRule.onNodeWithContentDescription("Position map with 0 INS history points and 0 raw GNSS history points · street map").assertExists()
+        // Restore the default choice so order-independent tests keep seeing the street map.
+        clearStoredMapBasemap(composeRule.activity)
     }
 
     @Test
@@ -229,7 +242,7 @@ class PhoneInsUiTest {
         composeRule.onNodeWithText("Origin 1.3521000, 103.8198000").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("History · INS 2 points · GNSS 0 points").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("INS displacement 15.7 m from initialization").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Position map with 2 INS history points and 0 raw GNSS history points").fetchSemanticsNode()
+        composeRule.onNodeWithContentDescription("Position map with 2 INS history points and 0 raw GNSS history points · street map").fetchSemanticsNode()
     }
 
     @Test

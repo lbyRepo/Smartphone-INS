@@ -168,7 +168,7 @@ class PhoneInsUiTest {
             }
         }
         composeRule.onNodeWithText("Initialization complete").assertIsDisplayed()
-        composeRule.onNodeWithText("Manual initialization applied · INS output is active").assertIsDisplayed()
+        composeRule.onNodeWithTag("initialization_progress_text").assertDoesNotExist()
     }
 
     @Test

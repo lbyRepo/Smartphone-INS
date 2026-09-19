@@ -25,6 +25,7 @@ data class InsUiState(
     val statusMessage: String = "Stopped",
     val sessionNames: List<String> = emptyList(),
     val csvLoggingEnabled: Boolean = false,
+    val csvLogElapsedMillis: Long = 0L,
     val csvLogFileName: String? = null,
     val csvLogPath: String? = null,
     val loggingError: String? = null,

@@ -2,6 +2,8 @@ package com.example.phoneins.ui
 
 import android.content.res.Configuration
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import com.example.phoneins.navigation.QualityFlag
 import androidx.compose.ui.tooling.preview.Preview
 import com.android.tools.screenshot.PreviewTest
 
@@ -27,11 +29,26 @@ private const val PHONE_HEIGHT_DP = 914
 private annotation class PrimaryScreenMatrix
 
 @Composable
-private fun PreviewApp(destination: Destination) {
+private fun PreviewApp(destination: Destination, outage: Boolean = false) {
     PhoneInsTheme {
         // Screenshot baselines stay on the deterministic grid renderer: street tiles would
         // introduce network-dependent pixels into the acceptance matrix.
-        PhoneInsScaffold(previewState(), destination, {}, { _, _ -> }, {}, MapBasemap.GRID) {}
+        val base = previewState()
+        val state = if (outage) base.copy(forcedGnssOutage = true, solution = base.solution.copy(
+            qualityFlags = base.solution.qualityFlags or QualityFlag.GNSS_AIDING_SUSPENDED or QualityFlag.DEAD_RECKONING,
+        )) else base
+        val history = remember {
+            PositionMapState().apply {
+                repeat(30) { index ->
+                    update(state.solution.copy(sequence = index.toLong(), monotonicNanos = (index + 1L) * 1_000_000_000L,
+                        latitudeDeg = 1.3521 + index * 0.00001, longitudeDeg = 103.8198 + index * 0.000007,
+                        latestGnss = state.solution.latestGnss?.copy(monotonicNanos = (index + 1L) * 1_000_000_000L,
+                            latitudeDeg = 1.3521 + index * 0.000009, longitudeDeg = 103.8198 + index * 0.000006),
+                    ))
+                }
+            }
+        }
+        PhoneInsScaffold(state, destination, {}, { _, _ -> }, {}, MapBasemap.GRID, mapStateOverride = history) {}
     }
 }
 
@@ -54,3 +71,9 @@ fun InitializationScreenshot() = PreviewApp(Destination.INITIALIZE)
 @PrimaryScreenMatrix
 @Composable
 fun SessionsScreenshot() = PreviewApp(Destination.SETTINGS)
+
+@PreviewTest
+@Preview(name = "outage_portrait", widthDp = PHONE_WIDTH_DP, heightDp = PHONE_HEIGHT_DP, showBackground = true)
+@Preview(name = "outage_large_font", widthDp = PHONE_WIDTH_DP, heightDp = PHONE_HEIGHT_DP, fontScale = 2f, showBackground = true)
+@Composable
+fun DashboardOutageScreenshot() = PreviewApp(Destination.DASHBOARD, outage = true)

@@ -15,6 +15,8 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.example.phoneins.data.InsUiState
@@ -37,6 +39,7 @@ class GnssOutageControlUiTest {
             PhoneInsTheme { DashboardScreen(InsUiState()) }
         }
 
+        composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("gnss_outage_toggle"))
         composeRule.onNodeWithText("Begin forced GNSS outage").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("gnss_outage_toggle")
             .assertIsNotEnabled()
@@ -57,6 +60,7 @@ class GnssOutageControlUiTest {
             }
         }
 
+        composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("gnss_outage_toggle"))
         composeRule.onNodeWithContentDescription("Forced GNSS outage control")
             .performScrollTo()
             .assertIsEnabled()
@@ -86,7 +90,7 @@ class GnssOutageControlUiTest {
         composeRule.onNodeWithText("Forced GNSS outage · raw fixes visible · dead reckoning")
             .performScrollTo()
             .assertIsDisplayed()
-        composeRule.onNodeWithText("End forced GNSS outage").assertIsDisplayed()
+        composeRule.onNodeWithText("Resume GNSS aiding").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("gnss_outage_toggle")
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "On"))
             .performClick()
@@ -102,6 +106,7 @@ class GnssOutageControlUiTest {
             }
         }
 
+        composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("gnss_outage_toggle"))
         composeRule.onNodeWithTag("gnss_outage_toggle")
             .performScrollTo()
             .assertIsDisplayed()

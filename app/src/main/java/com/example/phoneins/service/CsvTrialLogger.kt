@@ -12,6 +12,9 @@ import java.util.Date
 import java.util.Locale
 
 class CsvTrialLogger(private val context: Context, private val asynchronous: Boolean = true) {
+    @Volatile private var startedAtElapsedMillis = 0L
+    val elapsedMillis: Long get() = if (startedAtElapsedMillis == 0L) 0L else
+        (android.os.SystemClock.elapsedRealtime() - startedAtElapsedMillis).coerceAtLeast(0L)
     private val directory: File
         get() = trialLogDirectory(context)
 
@@ -28,6 +31,7 @@ class CsvTrialLogger(private val context: Context, private val asynchronous: Boo
     @Synchronized
     fun start(filePrefix: String = "phoneins_trial"): File {
         stop()
+        startedAtElapsedMillis = android.os.SystemClock.elapsedRealtime()
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val safePrefix = filePrefix.replace(Regex("[^A-Za-z0-9._-]+"), "_").take(96).trim('_').ifEmpty { "phoneins_trial" }
         val file = uniqueFile(directory, "${safePrefix}_$stamp", ".csv")

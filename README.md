@@ -16,7 +16,7 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 - Foreground navigation service for continued sensor processing.
 - Raw accelerometer, gyroscope, magnetometer, and GNSS display.
 - WGS84 position, NED velocity, Euler attitude, bias, uncertainty, timing, and quality-state display.
-- Position map with a street-map basemap (cached online raster tiles, © OpenStreetMap/CARTO) or a plain grid, INS/GNSS trails, heading arrow, and scale bar.
+- Position map with a street-map basemap (cached online raster tiles, © OpenStreetMap contributors) or a plain grid, INS/GNSS trails, heading arrow, and scale bar.
 - Automatic initialization with a 15-second stationary window using gravity for coarse roll/pitch alignment.
 - Manual initialization with user-entered WGS84 coordinates and Euler angles.
 - Heading strategy that avoids continuous magnetometer dependence:
@@ -31,7 +31,19 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 
 ## Project status
 
-Current app version: `0.3.7`.
+Current app version: `0.3.8`.
+
+Version 0.3.8 streamlines the Dashboard, adds a landscape map/summary layout,
+labels individual measurement axes, and distinguishes automatic CSV logging from
+optional binary recording. Uninitialized uncertainty is explicitly marked rather
+than displayed as zero.
+
+Street view uses standard OpenStreetMap raster tiles, with visible attribution,
+an identifying user agent, and local caching. It requires internet for uncached
+areas and is a best-effort service, not a guaranteed offline map. No bulk tile
+downloads are supported. If loading fails, choose **Use Grid instead**; navigation
+and logging continue independently. The standard map is light-coloured in both
+app themes. See the [tile usage policy](https://operations.osmfoundation.org/policies/tiles/).
 
 This is an engineering demonstrator, not a certified navigation product. The emulator and replay tests validate app behavior, UI state transitions, protocol handling, logging, and deterministic scenarios. Actual sensor quality, thermal behavior, sustained rates, USB behavior, and navigation performance must be validated on physical phones and real routes.
 

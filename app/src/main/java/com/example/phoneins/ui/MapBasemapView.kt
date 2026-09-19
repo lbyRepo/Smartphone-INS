@@ -7,6 +7,9 @@ import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.os.Handler
+import android.os.Looper
+import android.view.MotionEvent
 import com.example.phoneins.BuildConfig
 import org.osmdroid.config.Configuration
 import org.osmdroid.events.MapListener
@@ -15,14 +18,18 @@ import org.osmdroid.events.ZoomEvent
 import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
+import org.osmdroid.util.MapTileIndex
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
 import org.osmdroid.views.overlay.ScaleBarOverlay
 import java.io.File
 import kotlin.math.cos
-import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.floor
+import kotlin.math.ln
+import kotlin.math.tan
+import kotlin.math.pow
 
 /** Immutable tile-mode plot input. Points are geographic; osmdroid owns projection. */
 internal data class MapBasemapData(
@@ -41,13 +48,18 @@ internal data class MapBasemapPalette(
     val background: Int,
 )
 
+internal enum class BasemapAvailability { LOADING, AVAILABLE, UNAVAILABLE }
+
+internal fun sameMapGeometry(a: MapBasemapData?, b: MapBasemapData): Boolean =
+    a != null && a.insPoints == b.insPoints && a.gnssPoints == b.gnssPoints && a.origin == b.origin
+
 /**
  * Street-map counterpart of [PositionPlotView]. Renders the same INS/GNSS history over cached
- * online raster tiles (CARTO light/dark), with pinch-zoom/pan and auto-fit that yields to the
+ * online OpenStreetMap raster tiles, with pinch-zoom/pan and auto-fit that yields to the
  * user until the host requests a recenter through [MapBasemapData.recenterEpoch]. Rendering is
  * change-gated so a 10 Hz UI stream does not continuously invalidate the tile pipeline.
  */
-internal class MapBasemapView(context: Context, darkTheme: Boolean) : MapView(context) {
+internal class MapBasemapView(context: Context) : MapView(context) {
     private val density = resources.displayMetrics.density
     private val insTrail = Polyline(this)
     private val gnssTrail = Polyline(this)
@@ -55,17 +67,80 @@ internal class MapBasemapView(context: Context, darkTheme: Boolean) : MapView(co
     private val gnssMarker = Marker(this)
     private val insMarker = Marker(this)
     private var latestData = MapBasemapData(emptyList(), emptyList(), null, Double.NaN)
-    private var lastRenderSignature = Long.MIN_VALUE
-    private var lastFitSignature = Long.MIN_VALUE
+    private var lastRenderedData: MapBasemapData? = null
+    private var lastPalette: MapBasemapPalette? = null
+    private var lastFitData: MapBasemapData? = null
     private var appliedRecenterEpoch = 0
     private var userNavigated = false
     private var fitting = false
 
     /** Invoked when the user pans or zooms so the host can offer a recenter control. */
     var onUserNavigation: (() -> Unit)? = null
+    var onAvailabilityChanged: ((BasemapAvailability) -> Unit)? = null
+    private var availability = BasemapAvailability.LOADING
+    private val tileStatusHandler = Handler(Looper.getMainLooper()) {
+        // A tile callback is not proof that the entire viewport is available.
+        // Check the current centre tile, including cache hits.
+        post { checkTiles() }
+        true
+    }
+    private val tileTimeout = Runnable {
+        if (!centreTileCached()) setAvailability(BasemapAvailability.UNAVAILABLE)
+    }
+
+    private fun setAvailability(value: BasemapAvailability) {
+        if (value == availability) return
+        availability = value
+        onAvailabilityChanged?.invoke(value)
+    }
+
+    private fun centreTileCached(): Boolean {
+        val zoom = floor(zoomLevelDouble).toInt().coerceIn(0, 19)
+        val n = 2.0.pow(zoom)
+        val centre = mapCenter
+        val latitude = Math.toRadians(centre.latitude.coerceIn(-85.05112878, 85.05112878))
+        val x = floor((centre.longitude + 180.0) / 360.0 * n).toInt().coerceIn(0, n.toInt() - 1)
+        val y = floor((1.0 - ln(tan(latitude) + 1.0 / cos(latitude)) / Math.PI) / 2.0 * n).toInt().coerceIn(0, n.toInt() - 1)
+        return tileProvider.tileCache.getMapTile(MapTileIndex.getTileIndex(zoom, x, y)) != null
+    }
+
+    private fun checkTiles() {
+        if (centreTileCached()) {
+            removeCallbacks(tileTimeout)
+            setAvailability(BasemapAvailability.AVAILABLE)
+        } else if (availability == BasemapAvailability.AVAILABLE) {
+            setAvailability(BasemapAvailability.LOADING)
+            removeCallbacks(tileTimeout)
+            postDelayed(tileTimeout, 8_000)
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        postDelayed(tileTimeout, 8_000)
+    }
+
+    override fun dispatchDraw(canvas: Canvas) {
+        super.dispatchDraw(canvas)
+        post { checkTiles() }
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(tileTimeout)
+        tileProvider.tileRequestCompleteHandlers.remove(tileStatusHandler)
+        onUserNavigation = null
+        onAvailabilityChanged = null
+        super.onDetachedFromWindow()
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) noteUserNavigation()
+        return super.onTouchEvent(event)
+    }
 
     init {
-        setTileSource(if (darkTheme) CARTO_DARK else CARTO_LIGHT)
+        setTileSource(OSM_STANDARD)
+        tileProvider.tileRequestCompleteHandlers.add(tileStatusHandler)
         setMinZoomLevel(MIN_ZOOM_LEVEL)
         setMaxZoomLevel(MAX_ZOOM_LEVEL)
         setTilesScaledToDpi(true)
@@ -94,26 +169,26 @@ internal class MapBasemapView(context: Context, darkTheme: Boolean) : MapView(co
         overlays.add(ScaleBarOverlay(this).apply { setAlignBottom(true) })
         addMapListener(object : MapListener {
             override fun onScroll(event: ScrollEvent?): Boolean {
-                noteUserNavigation()
+                post { checkTiles() }
                 return false
             }
 
             override fun onZoom(event: ZoomEvent?): Boolean {
-                noteUserNavigation()
+                post { checkTiles() }
                 return false
             }
         })
     }
 
     fun render(data: MapBasemapData, palette: MapBasemapPalette) {
-        val signature = renderSignature(data, palette)
-        if (signature == lastRenderSignature) return
-        lastRenderSignature = signature
+        if (data == lastRenderedData && palette == lastPalette) return
+        lastRenderedData = data
+        lastPalette = palette
         latestData = data
         if (data.recenterEpoch != appliedRecenterEpoch) {
             appliedRecenterEpoch = data.recenterEpoch
             userNavigated = false
-            lastFitSignature = Long.MIN_VALUE
+            lastFitData = null
         }
 
         insTrail.outlinePaint.color = palette.ins
@@ -152,9 +227,12 @@ internal class MapBasemapView(context: Context, darkTheme: Boolean) : MapView(co
     }
 
     private fun fitIfNeeded(data: MapBasemapData) {
-        val signature = data.insPoints.size * 1_000_003L + data.gnssPoints.size
-        if (signature == lastFitSignature) return
-        lastFitSignature = signature
+        if (sameMapGeometry(lastFitData, data)) return
+        if (width == 0 || height == 0) {
+            post { if (isAttachedToWindow && width > 0 && height > 0 && !userNavigated) fitIfNeeded(latestData) }
+            return
+        }
+        lastFitData = data
         val points = ArrayList<GeoPoint>(data.insPoints.size + data.gnssPoints.size + 1)
         data.origin?.let(points::add)
         points.addAll(data.insPoints)
@@ -175,19 +253,6 @@ internal class MapBasemapView(context: Context, darkTheme: Boolean) : MapView(co
         } finally {
             fitting = false
         }
-    }
-
-    private fun renderSignature(data: MapBasemapData, palette: MapBasemapPalette): Long {
-        var result = data.insPoints.size.toLong()
-        result = 31L * result + data.gnssPoints.size
-        result = 31L * result + (data.origin?.latitude?.toBits() ?: 0L) * 31L + (data.origin?.longitude?.toBits() ?: 0L)
-        result = 31L * result + headingKey(data.insHeadingDeg)
-        result = 31L * result + data.recenterEpoch
-        result = 31L * result + palette.ins
-        result = 31L * result + palette.gnss
-        result = 31L * result + palette.foreground
-        result = 31L * result + palette.background
-        return result
     }
 
     private fun bitmapIcon(sizeDp: Int, draw: (Canvas, Paint) -> Unit): Drawable {
@@ -254,9 +319,6 @@ internal class MapBasemapView(context: Context, darkTheme: Boolean) : MapView(co
         }
     }
 
-    private fun headingKey(headingDeg: Double): Long =
-        if (headingDeg.isFinite()) headingDeg.roundToInt().toLong() else Long.MIN_VALUE
-
     companion object {
         private const val MIN_ZOOM_LEVEL = 3.0
         private const val MAX_ZOOM_LEVEL = 19.0
@@ -275,29 +337,16 @@ internal class MapBasemapView(context: Context, darkTheme: Boolean) : MapView(co
         /** Matches the deterministic simulator and manual-initialization default location. */
         private val DEFAULT_CENTER = GeoPoint(1.3521, 103.8198)
 
-        private val CARTO_LIGHT = XYTileSource(
-            "CartoPositron", 0, 20, 256, ".png",
-            arrayOf(
-                "https://a.basemaps.cartocdn.com/light_all/",
-                "https://b.basemaps.cartocdn.com/light_all/",
-                "https://c.basemaps.cartocdn.com/light_all/",
-            ),
-        )
-
-        private val CARTO_DARK = XYTileSource(
-            "CartoDarkMatter", 0, 20, 256, ".png",
-            arrayOf(
-                "https://a.basemaps.cartocdn.com/dark_all/",
-                "https://b.basemaps.cartocdn.com/dark_all/",
-                "https://c.basemaps.cartocdn.com/dark_all/",
-            ),
+        private val OSM_STANDARD = XYTileSource(
+            "PhoneInsOsmStandard", 0, 19, 256, ".png",
+            arrayOf("https://tile.openstreetmap.org/"),
         )
 
         @Volatile private var osmdroidConfigured = false
 
         /**
          * Point osmdroid at app-internal storage (no permissions needed) and identify the app to
-         * the tile servers, as required by the OpenStreetMap/Carto tile usage policies.
+         * the tile servers, as required by the OpenStreetMap tile usage policy.
          *
          * MUST run before the first [MapView] is constructed: the super constructor opens the
          * SQLite tile cache at the currently configured path and the writer is process-static.
@@ -307,7 +356,7 @@ internal class MapBasemapView(context: Context, darkTheme: Boolean) : MapView(co
             synchronized(this) {
                 if (osmdroidConfigured) return
                 val configuration = Configuration.getInstance()
-                configuration.userAgentValue = "SmartphoneINS/${BuildConfig.VERSION_NAME}"
+                configuration.userAgentValue = "SmartphoneINS/${BuildConfig.VERSION_NAME} (+https://github.com/lbyRepo/Smartphone-INS)"
                 configuration.osmdroidBasePath = File(context.cacheDir, "osmdroid")
                 configuration.osmdroidTileCache = File(context.cacheDir, "osmdroid/tiles")
                 osmdroidConfigured = true

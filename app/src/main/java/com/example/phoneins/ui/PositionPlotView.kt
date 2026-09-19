@@ -161,12 +161,8 @@ internal class PositionPlotView(context: Context) : View(context) {
 
     /** Graphical scale reference bottom-left, choosing a round metre length that fits nicely. */
     private fun drawScaleBar(canvas: Canvas, pixelsPerMetre: Float, density: Float) {
-        val minLengthPx = 48f * density
-        val maxLengthPx = 130f * density
-        val candidateMetres = listOf(500.0, 250.0, 200.0, 100.0, 50.0, 25.0, 20.0, 10.0, 5.0, 2.0, 1.0)
-        val metres = candidateMetres.firstOrNull { (it * pixelsPerMetre) >= minLengthPx } ?: return
+        val metres = scaleBarMetres(pixelsPerMetre, density) ?: return
         val lengthPx = (metres * pixelsPerMetre).toFloat()
-        if (lengthPx > maxLengthPx) return
         val left = 12f * density
         val bottom = height - 12f * density
         paint.style = Paint.Style.STROKE
@@ -177,9 +173,9 @@ internal class PositionPlotView(context: Context) : View(context) {
         canvas.drawLine(left, bottom, left + lengthPx, bottom, paint)
         canvas.drawLine(left, bottom - 4f * density, left, bottom + 4f * density, paint)
         canvas.drawLine(left + lengthPx, bottom - 4f * density, left + lengthPx, bottom + 4f * density, paint)
-        val label = if (metres >= 1.0) "${metres.toInt()} m" else "1 m"
+        val label = if (metres >= 1.0) "${metres.toInt()} m" else "$metres m"
         paint.style = Paint.Style.FILL
-        paint.textSize = 10f * density
+        paint.textSize = 12f * resources.displayMetrics.scaledDensity
         canvas.drawText(label, left, bottom - 8f * density, paint)
     }
 }

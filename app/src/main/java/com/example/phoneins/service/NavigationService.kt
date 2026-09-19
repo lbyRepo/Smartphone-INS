@@ -363,6 +363,7 @@ class NavigationService : Service() {
                                     aoaConnected = aoa.connected,
                                     recording = recorder.recording,
                                     csvLoggingEnabled = if (csvReplayPrepared) replayCsvLogger?.logging == true else csvLogger.logging,
+                                    csvLogElapsedMillis = if (csvReplayPrepared) replayCsvLogger?.elapsedMillis ?: 0L else csvLogger.elapsedMillis,
                                     loggingError = logErrors,
                                     droppedLogRecords = lostRecords,
                                     csvLogFileName = if (csvReplayPrepared) replayCsvLogger?.currentFile?.name else csvLogger.currentFile?.name,

@@ -10,6 +10,8 @@ import kotlin.math.*
  */
 class NavigationEngine(
     initialProfile: MotionProfile = MotionProfile.VEHICLE,
+    /** Causal moving-average window over raw IMU used for mechanization; < 2 disables smoothing. */
+    private val imuSmoothingWindow: Int = IMU_SMOOTHING_WINDOW_SAMPLES,
 ) {
     private var positionEcef = Vec3.ZERO
     private var velocityEcef = Vec3.ZERO
@@ -29,6 +31,8 @@ class NavigationEngine(
     private var lastOutputOverrun = false
     private val recentImu = ArrayDeque<TimedImuSample>()
     private val imuQuality = ImuQualityMonitor()
+    private val accelSmoothingWindow = ArrayDeque<Vec3>()
+    private val gyroSmoothingWindow = ArrayDeque<Vec3>()
     private var imuStationary = false
     private var imuClearlyMoving = false
     private var gnssStationaryUntilNanos = Long.MIN_VALUE
@@ -69,6 +73,8 @@ class NavigationEngine(
         lastOutputOverrun = false
         recentImu.clear()
         imuQuality.reset()
+        accelSmoothingWindow.clear()
+        gyroSmoothingWindow.clear()
         imuStationary = false
         imuClearlyMoving = false
         gnssStationaryUntilNanos = Long.MIN_VALUE
@@ -215,6 +221,8 @@ class NavigationEngine(
         if (!sample.fresh || !sample.accelerationMps2.toArray().all { it.isFinite() } ||
             !sample.angularRateRadps.toArray().all { it.isFinite() }) {
             recentImu.clear()
+            accelSmoothingWindow.clear()
+            gyroSmoothingWindow.clear()
             imuStationary = false
             imuClearlyMoving = false
             return
@@ -224,9 +232,13 @@ class NavigationEngine(
         val dt = (sample.monotonicNanos - previous.monotonicNanos) * 1e-9
         if (dt <= 0.0 || dt > 0.1) return
 
-        val angularRate = sample.angularRateRadps - gyroBias
+        // Mechanization uses a causal moving average of the raw samples to reduce vibration
+        // noise; quality monitoring and stillness detection above deliberately see the raw
+        // sample so smoothing cannot hide rough motion.
+        val mechanization = smoothedForMechanization(sample)
+        val angularRate = mechanization.angularRateRadps - gyroBias
         bodyToEcef = (bodyToEcef * Quaternion.fromRotationVector(angularRate * dt)).normalized()
-        val bodySpecificForce = sample.accelerationMps2 - accelerometerBias
+        val bodySpecificForce = mechanization.accelerationMps2 - accelerometerBias
         val accelerationEcef = multiply3(bodyToEcef.toMatrix(), bodySpecificForce) + gravityEcef(positionEcef)
         positionEcef = positionEcef + velocityEcef * dt + accelerationEcef * (0.5 * dt * dt)
         velocityEcef = velocityEcef + accelerationEcef * dt
@@ -896,6 +908,25 @@ class NavigationEngine(
 
     private fun index(row: Int, col: Int) = row * STATE_SIZE + col
 
+    /**
+     * Causal moving average of the last [imuSmoothingWindow] raw IMU samples, used only for
+     * mechanization. The window is skipped entirely when smoothing is disabled (< 2 samples).
+     */
+    private fun smoothedForMechanization(sample: TimedImuSample): TimedImuSample {
+        if (imuSmoothingWindow < 2) return sample
+        accelSmoothingWindow.addLast(sample.accelerationMps2)
+        gyroSmoothingWindow.addLast(sample.angularRateRadps)
+        while (accelSmoothingWindow.size > imuSmoothingWindow) {
+            accelSmoothingWindow.removeFirst()
+            gyroSmoothingWindow.removeFirst()
+        }
+        val n = accelSmoothingWindow.size.toDouble()
+        return sample.copy(
+            accelerationMps2 = accelSmoothingWindow.fold(Vec3.ZERO) { sum, value -> sum + value } / n,
+            angularRateRadps = gyroSmoothingWindow.fold(Vec3.ZERO) { sum, value -> sum + value } / n,
+        )
+    }
+
     companion object {
         /** Attitude-error process-noise amplitude in rad/sqrt(s); squared to form Q. */
         const val ATTITUDE_PROCESS_NOISE_RAD_PER_SQRT_SECOND = 0.004
@@ -903,6 +934,9 @@ class NavigationEngine(
         const val ACCEL_BIAS_PROCESS_NOISE_MPS2_PER_SQRT_SECOND = 0.002
         /** Gyroscope bias random walk, (rad/s)/sqrt(s). Squared to form Q. */
         const val GYRO_BIAS_PROCESS_NOISE_RADPS_PER_SQRT_SECOND = 0.0002
+
+        /** Default causal IMU smoothing window for mechanization (samples). */
+        const val IMU_SMOOTHING_WINDOW_SAMPLES = 10
         private const val STATE_SIZE = 15
         private const val POSITION = 0
         private const val VELOCITY = 3

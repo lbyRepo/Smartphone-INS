@@ -416,3 +416,41 @@ class NavigationEngineTest {
             Vec3(0.0, 0.0, -9.80665),
         )
 }
+
+@Test
+fun smoothingWindowSettlesToSteadyInput() {
+    val engine = NavigationEngine(imuSmoothingWindow = 10)
+    engine.initializeManual(ManualInitialization(1.0, 2.0, 10.0, 0.0, 0.0, 0.0))
+    var t = 1_000_000_000L
+    fun tick(accel: Vec3): Unit {
+        t += 10_000_000L
+        engine.processImu(TimedImuSample(t, accel, Vec3.ZERO))
+    }
+    repeat(15) { tick(Vec3(0.0, 0.0, -9.80665)) }
+    repeat(100) { tick(Vec3(1.0, 0.0, -9.80665)) }
+    val solution = engine.snapshot(t, 0)
+    // 100 samples at 1 m/s^2 minus the ~4.5-sample moving-average ramp-in deficit.
+    val expected = 100.0 * 0.01 * 1.0 - 4.5 * 0.01 * 1.0
+    assertTrue(abs(solution.velocityNedMps.x - expected) < 0.05, "v=${solution.velocityNedMps}")
+}
+
+@Test
+fun smoothingWindowAttenuatesSampleRateVibration() {
+    val raw = NavigationEngine(imuSmoothingWindow = 1)
+    val smoothed = NavigationEngine(imuSmoothingWindow = 10)
+    raw.initializeManual(ManualInitialization(1.0, 2.0, 10.0, 0.0, 0.0, 0.0))
+    smoothed.initializeManual(ManualInitialization(1.0, 2.0, 10.0, 0.0, 0.0, 0.0))
+    var t = 1_000_000_000L
+    val maxVelocity = doubleArrayOf(0.0, 0.0)
+    for (i in 0 until 600) {
+        t += 10_000_000L
+        val vibration = if (i % 2 == 0) 5.0 else -5.0
+        raw.processImu(TimedImuSample(t, Vec3(vibration, 0.0, -9.80665), Vec3.ZERO))
+        smoothed.processImu(TimedImuSample(t, Vec3(vibration, 0.0, -9.80665), Vec3.ZERO))
+        if (i >= 100) {
+            maxVelocity[0] = maxOf(maxVelocity[0], abs(raw.snapshot(t, 0).velocityNedMps.x))
+            maxVelocity[1] = maxOf(maxVelocity[1], abs(smoothed.snapshot(t, 0).velocityNedMps.x))
+        }
+    }
+    assertTrue(maxVelocity[0] > maxVelocity[1] * 3.0, "raw=${maxVelocity[0]} smoothed=${maxVelocity[1]}")
+}

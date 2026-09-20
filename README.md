@@ -58,7 +58,7 @@ Bicycle anchor 110.248 s: 95.04 m /
 violations (before: 567.65 m / 176.9°, 35 violations) — the residual is a ~0.2 m/s² along-track
 error that the route's closing stop exposes, because outage isolation clears the stationary latches
 by design. Full evidence, plots and diagnosis:
-[filter repair verification](outputs/filter-repair-v0.3.19/VERIFICATION.md).
+[filter repair verification](docs/filter-repair-verification-v0.3.19.md).
 
 Street-map zoom controls now use small transparent icons in the grey footer below
 the map while retaining 48 dp touch targets. OpenStreetMap attribution remains on

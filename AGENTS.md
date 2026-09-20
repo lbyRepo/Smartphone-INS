@@ -11,3 +11,13 @@
 - Historical artifact names and verification records should keep their original versions;
   do not rename old release artifacts to imply they were rebuilt.
 - The main development branch is named `master`. Do not rename it or push commits unless asked.
+
+## Emulator hand-off after each task
+
+- When a task that changed app behavior is done, build the debug APK, install it on the running
+  emulator with `adb install -r app/build/outputs/apk/debug/app-debug.apk`, and launch
+  `com.example.phoneins/.MainActivity` so the user can inspect the result.
+- Re-grant runtime permissions with `adb shell pm grant` after a fresh install clears them
+  (location fine/coarse, notifications).
+- Verify the activity actually resumed (`adb shell dumpsys activity activities`) and say which
+  screen or flow to look at; leave the emulator on that state when practical.

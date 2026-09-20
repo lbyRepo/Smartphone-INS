@@ -28,6 +28,7 @@ class NavigationEngine(
     private var outputSequence = 0L
     private var lastOutputOverrun = false
     private val recentImu = ArrayDeque<TimedImuSample>()
+    private val imuQuality = ImuQualityMonitor()
     private var imuStationary = false
     private var imuClearlyMoving = false
     private var gnssStationaryUntilNanos = Long.MIN_VALUE
@@ -39,6 +40,7 @@ class NavigationEngine(
     private var lastGnssVelocityUpdateNanos = Long.MIN_VALUE
     private var lastGnssUpdateRejected = false
     private var gnssAidingSuspended = false
+    private var steadyVelocityUntilNanos = Long.MIN_VALUE
     private var rejectedPositionCandidate: Vec3? = null
     private var rejectedPositionCandidateCount = 0
     private var rejectedVelocityCandidate: Vec3? = null
@@ -66,6 +68,7 @@ class NavigationEngine(
         outputSequence = 0
         lastOutputOverrun = false
         recentImu.clear()
+        imuQuality.reset()
         imuStationary = false
         imuClearlyMoving = false
         gnssStationaryUntilNanos = Long.MIN_VALUE
@@ -77,6 +80,7 @@ class NavigationEngine(
         lastGnssVelocityUpdateNanos = Long.MIN_VALUE
         lastGnssUpdateRejected = false
         gnssAidingSuspended = false
+        steadyVelocityUntilNanos = Long.MIN_VALUE
         rejectedPositionCandidate = null
         rejectedPositionCandidateCount = 0
         rejectedVelocityCandidate = null
@@ -205,6 +209,7 @@ class NavigationEngine(
     @Synchronized
     fun processImu(sample: TimedImuSample) {
         val previous = lastImu
+        imuQuality.observe(sample)
         if (previous != null && sample.monotonicNanos <= previous.monotonicNanos) return
         lastImu = sample
         if (!sample.fresh || !sample.accelerationMps2.toArray().all { it.isFinite() } ||
@@ -237,6 +242,15 @@ class NavigationEngine(
         gnssAidingSuspended = false
         val previousFix = lastGnss
         lastGnss = fix
+        steadyVelocityUntilNanos = Long.MIN_VALUE
+        if (!resumingSuspendedAiding && previousFix != null &&
+            previousFix.hasHorizontalVelocity && fix.hasHorizontalVelocity &&
+            previousFix.speedAccuracyMps in 0.0..0.5 && fix.speedAccuracyMps in 0.0..0.5) {
+            val dt = (fix.monotonicNanos - previousFix.monotonicNanos) * 1e-9
+            if (dt in 0.1..1.5 && (fix.velocityNedMps - previousFix.velocityNedMps).norm() / dt < 0.3) {
+                steadyVelocityUntilNanos = fix.monotonicNanos + 1_200_000_000L
+            }
+        }
         if (initSource == InitSource.NONE) return
 
         val aidingAltitude = if (fix.hasAltitude && fix.altitudeEllipsoidM.isFinite()) {
@@ -256,6 +270,7 @@ class NavigationEngine(
             ecefToNed,
             doubleArrayOf(horizontalNoise, horizontalNoise, verticalNoise),
             correctAttitude = false,
+            correctBias = imuQuality.canLearn(fix.monotonicNanos),
         )
         val requiredPositionMask = if (fix.hasAltitude) (AXIS_N or AXIS_E or AXIS_D) else (AXIS_N or AXIS_E)
         var positionAccepted = (positionAxisMask and requiredPositionMask) == requiredPositionMask
@@ -290,6 +305,7 @@ class NavigationEngine(
                 doubleArrayOf(speedNoise, speedNoise, downNoise),
                 correctAttitude = false,
                 axisMask = if (downUsable) 7 else AXIS_N or AXIS_E,
+                correctBias = imuQuality.canLearn(fix.monotonicNanos),
             )
             velocityAccepted = (velocityAxisMask and (AXIS_N or AXIS_E)) == (AXIS_N or AXIS_E)
             if (velocityAccepted) {
@@ -344,6 +360,7 @@ class NavigationEngine(
         if (initSource == InitSource.NONE) {
             return NavigationSolution.empty(monotonicNanos, unixMillis).copy(
                 latestImu = lastImu,
+                qualityFlags = if (lastImu?.clipped == true) QualityFlag.IMU_CLIPPED else 0,
                 latestGnss = lastGnss,
                 motionProfile = profile,
                 sequence = outputSequence++,
@@ -383,6 +400,8 @@ class NavigationEngine(
         if (stationaryConstrained && isStationaryAt(monotonicNanos)) flags = flags or QualityFlag.STATIONARY_CONSTRAINT
         if (gnssFresh && lastGnssUpdateRejected) flags = flags or QualityFlag.GNSS_UPDATE_REJECTED
         if (gnssFresh && gnssAidingSuspended) flags = flags or QualityFlag.GNSS_AIDING_SUSPENDED
+        if (!imuQuality.canLearn(monotonicNanos)) flags = flags or QualityFlag.BIAS_LEARNING_HELD
+        if (lastImu?.clipped == true) flags = flags or QualityFlag.IMU_CLIPPED
 
         val positionStd = projectedStandardDeviation(covariance, STATE_SIZE, POSITION, ecefToNed)
         val velocityStd = projectedStandardDeviation(covariance, STATE_SIZE, VELOCITY, ecefToNed)
@@ -428,40 +447,19 @@ class NavigationEngine(
         for (i in phi.indices) phi[i] += f[i] * dt
         val temp = multiply(phi, covariance)
         covariance = multiply(temp, transpose(phi))
-        val noise = doubleArrayOf(0.0, 0.0, 0.0, 0.08, 0.08, 0.08, 0.004, 0.004, 0.004, 0.002, 0.002, 0.002, 0.0002, 0.0002, 0.0002)
+        // Qd = diag(noise²) * dt. Attitude entries are small-angle ECEF errors,
+        // NOT Euler-angle variances. Doubling the amplitude below quadruples Qd.
+        val attitudeNoise = ATTITUDE_PROCESS_NOISE_RAD_PER_SQRT_SECOND
+        val accelBiasNoise = ACCEL_BIAS_PROCESS_NOISE_MPS2_PER_SQRT_SECOND
+        val gyroBiasNoise = GYRO_BIAS_PROCESS_NOISE_RADPS_PER_SQRT_SECOND
+        val noise = doubleArrayOf(0.0, 0.0, 0.0, 0.08, 0.08, 0.08,
+            attitudeNoise, attitudeNoise, attitudeNoise,
+            accelBiasNoise, accelBiasNoise, accelBiasNoise,
+            gyroBiasNoise, gyroBiasNoise, gyroBiasNoise)
         for (i in 0 until STATE_SIZE) covariance[index(i, i)] += noise[i] * noise[i] * dt
         symmetrizeCovariance()
     }
 
-    private fun updateVectorMeasurement(
-        measured: Vec3,
-        predicted: Vec3,
-        stateOffset: Int,
-        noiseStd: DoubleArray,
-        gateSigma: Double = 6.0,
-    ): Int {
-        val residual = measured - predicted
-        val residuals = residual.toArray()
-        var acceptedMask = 0
-        for (axis in 0..2) {
-            val measurementState = stateOffset + axis
-            val variance = noiseStd[axis] * noiseStd[axis]
-            val innovationVariance = covariance[index(measurementState, measurementState)] + variance
-            if (!residuals[axis].isFinite() || !innovationVariance.isFinite() || innovationVariance <= 0.0 ||
-                residuals[axis] * residuals[axis] > gateSigma * gateSigma * innovationVariance) continue
-            val gain = DoubleArray(STATE_SIZE) { covariance[index(it, measurementState)] / innovationVariance }
-            val correction = DoubleArray(STATE_SIZE) { gain[it] * residuals[axis] }
-            val oldRow = DoubleArray(STATE_SIZE) { covariance[index(measurementState, it)] }
-            for (row in 0 until STATE_SIZE) for (col in 0 until STATE_SIZE) {
-                covariance[index(row, col)] -= gain[row] * oldRow[col]
-            }
-            applyError(correction)
-            for (remaining in axis + 1..2) residuals[remaining] -= correction[stateOffset + remaining]
-            acceptedMask = acceptedMask or (1 shl axis)
-        }
-        symmetrizeCovariance()
-        return acceptedMask
-    }
 
     /** Applies a vector measurement whose uncertainties are defined in local NED, not ECEF axes. */
     private fun updateNedMeasurement(
@@ -472,6 +470,7 @@ class NavigationEngine(
         gateSigma: Double = 6.0,
         correctAttitude: Boolean = true,
         axisMask: Int = 7,
+        correctBias: Boolean = lastImu?.let { imuQuality.canLearn(it.monotonicNanos) } == true,
     ): Int {
         val residuals = residualNed.toArray()
         var acceptedMask = 0
@@ -490,6 +489,13 @@ class NavigationEngine(
                 gain[row] += covariance[index(row, col)] * h[col] / innovationVariance
             }
             if (!correctAttitude) for (attitudeAxis in 0..2) gain[ATTITUDE + attitudeAxis] = 0.0
+            // Schmidt-style hold: zero bias gain rows BEFORE Joseph covariance update.
+            // Position/velocity corrections continue and bias uncertainty still propagates.
+            if (!correctBias) for (biasState in ACCEL_BIAS until STATE_SIZE) gain[biasState] = 0.0
+            // This filter deliberately decouples GNSS from attitude. Do not let
+            // velocity residuals indirectly teach gyro bias through stale attitude
+            // cross-covariance (including ZUPT); use the stationary gyro mean instead.
+            for (biasState in GYRO_BIAS until STATE_SIZE) gain[biasState] = 0.0
             val projectedCovariance = DoubleArray(STATE_SIZE)
             for (col in 0 until STATE_SIZE) for (row in 0 until STATE_SIZE) {
                 projectedCovariance[col] += h[row] * covariance[index(row, col)]
@@ -621,14 +627,14 @@ class NavigationEngine(
 
     private fun applyStationaryConstraint(sample: TimedImuSample) {
         stationaryConstrained = false
-        if (!isStationaryAt(sample.monotonicNanos)) return
+        if (!isStationaryAt(sample.monotonicNanos) || !imuStationary || !imuQuality.canLearn(sample.monotonicNanos)) return
         val meanAcceleration = recentImu.map { it.accelerationMps2 }.averageVec()
         val meanAngularRate = recentImu.map { it.angularRateRadps }.averageVec()
         val expectedSpecificForceBody = multiply3(
             transpose3(bodyToEcef.toMatrix()),
             gravityEcef(positionEcef) * -1.0,
         )
-        if (imuStationary) {
+        if (meanAngularRate.norm() < 0.025 && abs(meanAcceleration.norm() - STANDARD_GRAVITY) < 0.15) {
             accelerometerBias = accelerometerBias * (1.0 - STATIONARY_BIAS_ALPHA) +
                 (meanAcceleration - expectedSpecificForceBody) * STATIONARY_BIAS_ALPHA
             gyroBias = gyroBias * (1.0 - STATIONARY_BIAS_ALPHA) + meanAngularRate * STATIONARY_BIAS_ALPHA
@@ -651,11 +657,17 @@ class NavigationEngine(
 
     private fun stabilizeTiltFromGravity(specificForceBody: Vec3, angularRateBody: Vec3) {
         if (initSource == InitSource.NONE) return
+        val time = lastImu?.monotonicNanos ?: return
+        // Norm alone cannot distinguish gravity from vehicle acceleration. Require
+        // clean IMU plus stationary or fresh, low-acceleration GNSS velocity evidence.
+        val steadyMotion = !gnssAidingSuspended && !lastGnssUpdateRejected &&
+            time <= steadyVelocityUntilNanos && angularRateBody.norm() < 0.08
+        if (!imuQuality.canLearn(time) || !imuStationary || (!isStationaryAt(time) && !steadyMotion)) return
         val forceNorm = specificForceBody.norm()
         if (forceNorm !in 7.0..12.5) return
         val horizontalAngularRate = hypot(angularRateBody.x, angularRateBody.y)
         val alpha = when {
-            imuStationary -> 0.05
+            isStationaryAt(time) -> 0.05
             abs(forceNorm - STANDARD_GRAVITY) < 0.8 && horizontalAngularRate < 0.08 -> 0.015
             abs(forceNorm - STANDARD_GRAVITY) < 1.5 && horizontalAngularRate < 0.20 -> 0.003
             else -> return
@@ -885,6 +897,12 @@ class NavigationEngine(
     private fun index(row: Int, col: Int) = row * STATE_SIZE + col
 
     companion object {
+        /** Attitude-error process-noise amplitude in rad/sqrt(s); squared to form Q. */
+        const val ATTITUDE_PROCESS_NOISE_RAD_PER_SQRT_SECOND = 0.004
+        /** Accelerometer bias random walk, (m/s²)/sqrt(s). Squared to form Q. */
+        const val ACCEL_BIAS_PROCESS_NOISE_MPS2_PER_SQRT_SECOND = 0.002
+        /** Gyroscope bias random walk, (rad/s)/sqrt(s). Squared to form Q. */
+        const val GYRO_BIAS_PROCESS_NOISE_RADPS_PER_SQRT_SECOND = 0.0002
         private const val STATE_SIZE = 15
         private const val POSITION = 0
         private const val VELOCITY = 3

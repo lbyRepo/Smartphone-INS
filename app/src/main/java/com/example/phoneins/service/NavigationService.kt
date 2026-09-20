@@ -114,9 +114,14 @@ class NavigationService : Service() {
         when (requestedAction) {
             ACTION_STOP -> { stopSelf(); return START_NOT_STICKY }
             ACTION_INITIALIZE_AUTO -> {
+                if (InsRepository.state.value.simulatedMotionRunning) {
+                    reportInitializationFailure(IllegalArgumentException("Reset the filter to restart stationary simulation before aligning."), "Simulation is moving")
+                    return START_NOT_STICKY
+                }
                 autoRequestedNanos = SystemClock.elapsedRealtimeNanos()
                 InsRepository.update {
                     it.copy(
+                        initializationError = null,
                         initializationInProgress = true,
                         initializationProgress = 0f,
                         initializationElapsedSeconds = 0.0,
@@ -133,8 +138,16 @@ class NavigationService : Service() {
                 forcedGnssOutage = false
                 engine.reset(InsRepository.state.value.solution.motionProfile)
                 autoRequestedNanos = null
+                if (simulated && simulator != null) {
+                    simulator = DeterministicSimulator(SystemClock.elapsedRealtimeNanos(), System.currentTimeMillis())
+                    synchronized(stationaryImu) { stationaryImu.clear() }
+                    latestGnss = null
+                    latestMag = null
+                    InsRepository.update { it.copy(simulatedMotionRunning = false) }
+                }
                 InsRepository.update {
                     it.copy(
+                        initializationError = null,
                         initializationInProgress = false,
                         initializationProgress = 0f,
                         initializationElapsedSeconds = 0.0,
@@ -159,6 +172,7 @@ class NavigationService : Service() {
                     InsRepository.update {
                         it.copy(
                             simulated = simulated,
+                            initializationError = null,
                             initializationInProgress = false,
                             initializationProgress = 0f,
                             initializationElapsedSeconds = 0.0,
@@ -168,6 +182,14 @@ class NavigationService : Service() {
                             statusMessage = if (simulated) "Simulator ready · initialize to begin" else "Live sensors ready · initialize to begin",
                         )
                     }
+                }
+            }
+            ACTION_SIMULATED_MOTION -> {
+                val state = InsRepository.state.value
+                if (BuildConfig.SIMULATOR_AVAILABLE && simulated && simulator != null &&
+                    state.solution.initialized && !state.initializationInProgress && state.initializationError == null && !state.replaying) {
+                    simulator?.startMotion(SystemClock.elapsedRealtimeNanos())
+                    InsRepository.update { it.copy(simulatedMotionRunning = true) }
                 }
             }
             ACTION_FORCE_GNSS_OUTAGE -> {
@@ -241,6 +263,7 @@ class NavigationService : Service() {
                 loggingError = listOfNotNull(csvLogger.error, recorder.error).distinct().joinToString(" · ").ifEmpty { null },
                 droppedLogRecords = csvLogger.droppedRecords + recorder.droppedRecords,
                 forcedGnssOutage = false,
+                initializationError = null,
                 initializationInProgress = false,
                 initializationProgress = 0f,
                 statusMessage = "Stopped",
@@ -250,6 +273,7 @@ class NavigationService : Service() {
     }
 
     private fun startSource() {
+        InsRepository.update { it.copy(simulatedMotionRunning = false) }
         if (simulated) {
             simulator = DeterministicSimulator(SystemClock.elapsedRealtimeNanos(), System.currentTimeMillis())
         } else {
@@ -264,11 +288,12 @@ class NavigationService : Service() {
     }
 
     private fun stopSource() {
+        InsRepository.update { it.copy(simulatedMotionRunning = false) }
         acquisition?.stop(); acquisition = null; simulator = null
     }
 
     private fun acceptImu(sample: TimedImuSample) {
-        if (!sample.fresh) {
+        if (!sample.fresh || sample.clipped) {
             synchronized(stationaryImu) { stationaryImu.clear() }
             engine.processImu(sample)
             return
@@ -441,11 +466,17 @@ class NavigationService : Service() {
         val declination = GeomagneticField(
             gnss.latitudeDeg.toFloat(), gnss.longitudeDeg.toFloat(), gnss.altitudeEllipsoidM.toFloat(), gnss.unixMillis,
         ).declination.toDouble()
-        engine.initializeAutomatic(gnss, meanAcceleration, meanAngularRate, mag.fieldMicroTesla, declination)
+        try {
+            engine.initializeAutomatic(gnss, meanAcceleration, meanAngularRate, mag.fieldMicroTesla, declination)
+        } catch (error: IllegalArgumentException) {
+            reportInitializationFailure(error, "Automatic initialization failed")
+            return
+        }
         autoRequestedNanos = null
         val completedCoarse = gravityRollPitchDeg(meanAcceleration)
         InsRepository.update {
             it.copy(
+                initializationError = null,
                 initializationInProgress = false,
                 initializationProgress = 1f,
                 initializationElapsedSeconds = AUTO_INITIALIZATION_DURATION_NANOS * 1e-9,
@@ -457,20 +488,39 @@ class NavigationService : Service() {
         }
     }
 
+    private fun reportInitializationFailure(error: Throwable, fallback: String) {
+        autoRequestedNanos = null
+        val message = error.message ?: fallback
+        InsRepository.update {
+            it.copy(initializationInProgress = false, initializationError = message, statusMessage = message)
+        }
+    }
+
     private fun initializeManual(intent: Intent) {
+        autoRequestedNanos = null
+        InsRepository.update { it.copy(initializationError = null, initializationInProgress = false) }
         val request = ManualInitialization(
             intent.getDoubleExtra("latitude", Double.NaN), intent.getDoubleExtra("longitude", Double.NaN),
             intent.getDoubleExtra("altitude", Double.NaN), intent.getDoubleExtra("roll", Double.NaN),
             intent.getDoubleExtra("pitch", Double.NaN), intent.getDoubleExtra("yaw", Double.NaN),
         )
-        val samples = synchronized(stationaryImu) { stationaryImu.toList().takeLast(300) }
-        val acceleration = if (samples.isEmpty()) Vec3(0.0, 0.0, -9.80665) else samples.map { it.accelerationMps2 }.averageVec()
-        val angularRate = if (samples.isEmpty()) Vec3.ZERO else samples.map { it.angularRateRadps }.averageVec()
-        runCatching { engine.initializeManual(request, acceleration, angularRate) }
+        runCatching {
+            require(!InsRepository.state.value.simulatedMotionRunning) { "Reset the filter to restart stationary simulation before aligning." }
+            val now = SystemClock.elapsedRealtimeNanos()
+            val samples = synchronized(stationaryImu) { stationaryImu.filter { now - it.monotonicNanos <= 3_200_000_000L } }
+            val (acceleration, angularRate) = staticImuMeans(samples, now)
+            latestGnss?.takeIf { now - it.monotonicNanos in 0L..2_000_000_000L && it.hasHorizontalVelocity }?.let {
+                require(kotlin.math.hypot(it.velocityNedMps.x, it.velocityNedMps.y) < 0.5) {
+                    "GNSS reports motion. Stop moving before manual initialization."
+                }
+            }
+            engine.initializeManual(request, acceleration, angularRate)
+        }
             .onSuccess {
                 autoRequestedNanos = null
                 InsRepository.update {
                     it.copy(
+                        initializationError = null,
                         initializationInProgress = false,
                         initializationProgress = 1f,
                         initializationElapsedSeconds = 0.0,
@@ -480,7 +530,7 @@ class NavigationService : Service() {
                     )
                 }
             }
-            .onFailure { error -> InsRepository.update { it.copy(statusMessage = error.message ?: "Invalid manual initialization") } }
+            .onFailure { error -> reportInitializationFailure(error, "Invalid manual initialization") }
     }
 
     private fun replay(name: String) {
@@ -604,6 +654,8 @@ class NavigationService : Service() {
         csvReplayPrepared = true
         InsRepository.update {
             it.copy(
+                initializationError = null,
+                initializationInProgress = false,
                 simulated = true,
                 recording = false,
                 forcedGnssOutage = false,
@@ -833,6 +885,8 @@ class NavigationService : Service() {
                         replaying = false,
                         forcedGnssOutage = false,
                         solution = NavigationSolution.empty().copy(motionProfile = profileBeforeCsvReplay),
+                        initializationError = null,
+                        initializationInProgress = false,
                         csvLoggingEnabled = true,
                         csvLogFileName = file.name,
                         csvLogPath = file.absolutePath,
@@ -858,7 +912,7 @@ class NavigationService : Service() {
         var imu = row.takeIf {
             it.imuMonotonicNanos > 0L && it.imuMonotonicNanos != feed.lastImuNanos &&
                 it.acceleration.isFiniteVec() && it.angularRate.isFiniteVec()
-        }?.let { TimedImuSample(it.imuMonotonicNanos, it.acceleration, it.angularRate, fresh = it.imuFresh) }
+        }?.let { TimedImuSample(it.imuMonotonicNanos, it.acceleration, it.angularRate, fresh = it.imuFresh, clipped = it.imuClipped) }
         val gnss = row.takeIf {
             it.gnssMonotonicNanos > 0L && it.gnssMonotonicNanos != feed.lastGnssNanos &&
                 it.gnssPosition.x.isFinite() && it.gnssPosition.y.isFinite()
@@ -939,6 +993,7 @@ class NavigationService : Service() {
                 it.copy(
                     simulated = true,
                     replaying = true,
+                    initializationError = null,
                     initializationInProgress = false,
                     initializationProgress = 0f,
                     initializationElapsedSeconds = 0.0,
@@ -1067,6 +1122,7 @@ class NavigationService : Service() {
         const val ACTION_RESET = "com.example.phoneins.RESET"
         const val ACTION_PROFILE = "com.example.phoneins.PROFILE"
         const val ACTION_SIMULATION = "com.example.phoneins.SIMULATION"
+        const val ACTION_SIMULATED_MOTION = "com.example.phoneins.SIMULATED_MOTION"
         const val ACTION_FORCE_GNSS_OUTAGE = "com.example.phoneins.FORCE_GNSS_OUTAGE"
         const val ACTION_RECORDING = "com.example.phoneins.RECORDING"
         const val ACTION_REPLAY = "com.example.phoneins.REPLAY"
@@ -1097,6 +1153,7 @@ class NavigationService : Service() {
         private const val MIN_AUTO_INITIALIZATION_IMU_SAMPLES = 300
         private val CSV_REPLAY_SPEEDS = setOf(0.5, 1.0, 2.0, 10.0)
         private val CSV_REPLAY_CONFLICTING_ACTIONS = setOf(
+            ACTION_SIMULATED_MOTION,
             ACTION_INITIALIZE_AUTO,
             ACTION_INITIALIZE_MANUAL,
             ACTION_RESET,

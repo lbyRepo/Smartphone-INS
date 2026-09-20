@@ -31,7 +31,36 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 
 ## Project status
 
-Current app version: `0.3.8`.
+Current app version: `0.3.13`.
+
+Street-map zoom controls now use small transparent icons in the grey footer below
+the map while retaining 48 dp touch targets. OpenStreetMap attribution remains on
+the footer's right side, leaving the map itself unobstructed.
+
+The deterministic simulator now stays stationary until **More → Start simulated
+motion** is pressed after initialization. **Init → Reset filter** restarts its
+stationary state. Simulator truth starts at 1.3521° N, 103.8198° E, 25 m, level and
+north-facing; use that pose for manual simulator alignment. Manual bias estimation
+requires at least 3 seconds / 300 fresh, stable IMU samples and rejects known motion.
+IMU-only stillness cannot distinguish rest from constant translational velocity.
+
+Bias process noise is configured in `NavigationEngine` by
+`ACCEL_BIAS_PROCESS_NOISE_MPS2_PER_SQRT_SECOND` (`0.002`) and
+`GYRO_BIAS_PROCESS_NOISE_RADPS_PER_SQRT_SECOND` (`0.0002`). Version 0.3.11 restores
+these pre-tuning amplitudes: bumps should not be treated as rapid bias drift.
+Their squares times `dt` enter the corresponding Q diagonals. Attitude amplitude
+remains `0.004`. A rolling IMU quality check pauses bias learning during rough
+motion, possible clipping, timing faults and clean-data recovery while retaining
+valid GNSS position/velocity corrections. Gravity tilt aiding requires clean,
+GNSS-confirmed stationary or low-acceleration steady motion. Gyro bias learning
+requires confirmed stillness; it no longer follows moving GNSS residuals in this
+attitude-decoupled filter. Raw shows bias-learning status; CSV/USB quality
+bits 17/18 carry hold/clipping information without changing frame size or columns.
+See [rough-road protection](docs/rough-road-bias-protection-v0.3.11.md) for limits.
+
+Version 0.3.9 replaces the Dashboard initialization banner with one compact,
+colour-coded indicator and a plain GNSS aiding switch. Alignment details remain
+on Init; logging details remain on More.
 
 Version 0.3.8 streamlines the Dashboard, adds a landscape map/summary layout,
 labels individual measurement axes, and distinguishes automatic CSV logging from

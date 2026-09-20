@@ -54,6 +54,47 @@ class NavigationServiceInstrumentedTest {
     }
 
     @Test
+    fun initializationFailureClearsOnRetrySuccessAndReset() {
+        startService(NavigationService.ACTION_START)
+        await(10_000) { InsRepository.state.value.serviceRunning }
+        // Missing numeric pose is an actual failed attempt, not an idle/waiting state.
+        startService(NavigationService.ACTION_INITIALIZE_MANUAL)
+        await(5_000) { InsRepository.state.value.initializationError != null }
+        assertTrue(!InsRepository.state.value.initializationInProgress)
+        startService(NavigationService.ACTION_INITIALIZE_AUTO)
+        await(5_000) {
+            InsRepository.state.value.initializationError == null && InsRepository.state.value.initializationInProgress
+        }
+        Thread.sleep(3_500) // Manual bias estimation needs a fresh stationary window.
+        startService(NavigationService.ACTION_INITIALIZE_MANUAL) {
+            putExtra("latitude", 1.3521)
+            putExtra("longitude", 103.8198)
+            putExtra("altitude", 10.0)
+            putExtra("roll", 0.0)
+            putExtra("pitch", 0.0)
+            putExtra("yaw", 0.0)
+        }
+        await(5_000) { InsRepository.state.value.solution.initialized }
+        assertEquals(null, InsRepository.state.value.initializationError)
+        startService(NavigationService.ACTION_RESET)
+        await(5_000) { !InsRepository.state.value.solution.initialized }
+        assertEquals(null, InsRepository.state.value.initializationError)
+        assertTrue(!InsRepository.state.value.initializationInProgress)
+    }
+
+    @Test
+    fun automaticAlignmentCompletesWhileSimulatorRemainsStationary() {
+        startService(NavigationService.ACTION_START)
+        await(10_000) { InsRepository.state.value.serviceRunning }
+        startService(NavigationService.ACTION_SIMULATION) { putExtra("enabled", true) }
+        startService(NavigationService.ACTION_INITIALIZE_AUTO)
+        await(25_000) { InsRepository.state.value.solution.initialized }
+        assertTrue(!InsRepository.state.value.simulatedMotionRunning)
+        assertTrue(InsRepository.state.value.solution.velocityNedMps.norm() < 0.05)
+        assertEquals(0.0, InsRepository.state.value.solution.latestGnss!!.velocityNedMps.norm(), 0.0)
+    }
+
+    @Test
     fun publicPhoneDatasetReachesProductionUiStateWithoutCrash() {
         startService(NavigationService.ACTION_START)
         await(10_000) { InsRepository.state.value.serviceRunning }
@@ -110,6 +151,7 @@ class NavigationServiceInstrumentedTest {
         await(10_000) { InsRepository.state.value.serviceRunning }
         startService(NavigationService.ACTION_SIMULATION) { putExtra("enabled", true) }
         await(10_000) { InsRepository.state.value.simulated }
+        Thread.sleep(3_500)
         startService(NavigationService.ACTION_INITIALIZE_MANUAL) {
             putExtra("latitude", 1.3521)
             putExtra("longitude", 103.8198)
@@ -138,6 +180,14 @@ class NavigationServiceInstrumentedTest {
                 state.solution.qualityFlags and QualityFlag.GNSS_AIDING_SUSPENDED == 0
         }
         assertTrue("Service stopped during simulated reacquisition", InsRepository.state.value.serviceRunning)
+        assertTrue(InsRepository.state.value.solution.velocityNedMps.norm() < 0.05)
+        startService(NavigationService.ACTION_SIMULATED_MOTION)
+        await(10_000) { InsRepository.state.value.simulatedMotionRunning && InsRepository.state.value.solution.velocityNedMps.norm() > 1.0 }
+        startService(NavigationService.ACTION_INITIALIZE_MANUAL)
+        await(5_000) { InsRepository.state.value.initializationError != null }
+        startService(NavigationService.ACTION_RESET)
+        await(5_000) { !InsRepository.state.value.solution.initialized && !InsRepository.state.value.simulatedMotionRunning }
+        await(5_000) { InsRepository.state.value.solution.latestGnss?.velocityNedMps?.norm() == 0.0 }
     }
 
     @Test
@@ -323,6 +373,6 @@ class NavigationServiceInstrumentedTest {
             if (predicate()) return
             Thread.sleep(25)
         }
-        assertTrue("Timed out after $timeoutMillis ms", predicate())
+        assertTrue("Timed out after $timeoutMillis ms; initialization=${InsRepository.state.value.initializationError}; IMU rate=${InsRepository.state.value.imuRateHz}", predicate())
     }
 }

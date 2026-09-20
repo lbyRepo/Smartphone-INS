@@ -15,14 +15,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
@@ -36,6 +39,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.phoneins.BuildConfig
 import com.example.phoneins.data.InsRepository
 import com.example.phoneins.data.InsUiState
+import com.example.phoneins.data.InitializationStatus
+import com.example.phoneins.data.initializationStatus
 import com.example.phoneins.data.CsvReplayPhase
 import com.example.phoneins.navigation.*
 import com.example.phoneins.service.NavigationService
@@ -249,31 +254,15 @@ private fun DashboardScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            DashboardStatus(state)
-        }
-        item {
-            BoxWithConstraints {
-                if (maxWidth >= 700.dp && LocalDensity.current.fontScale < 1.5f) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        Column(Modifier.weight(1.4f)) {
-                            PositionMapCard(solution, positionMapState, mapBasemap, onMapBasemapChange)
-                        }
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            NavigationSummary(solution)
-                            GnssOutageControl(state, sendAction)
-                        }
-                    }
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        NavigationSummary(solution)
-                        // Put the recovery action before the map whenever aiding is suspended.
-                        if (state.forcedGnssOutage) GnssOutageControl(state, sendAction)
-                        PositionMapCard(solution, positionMapState, mapBasemap, onMapBasemapChange)
-                        if (!state.forcedGnssOutage) GnssOutageControl(state, sendAction)
-                    }
-                }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                DashboardStatus(state)
+                DashboardWarnings(state)
             }
         }
+        item {
+            PositionMapCard(solution, positionMapState, mapBasemap, onMapBasemapChange)
+        }
+        item { GnssOutageControl(state, sendAction) }
         item {
             SectionTitle("INS solution")
             AdaptiveMetricGrid(
@@ -329,48 +318,52 @@ private fun Vec3.axes(a: String, b: String, c: String, decimals: Int, available:
     }
 
 @Composable
-private fun NavigationSummary(solution: NavigationSolution) {
-    AdaptiveMetricGrid(listOf(
-        Metric("Speed", kotlin.math.hypot(solution.velocityNedMps.x, solution.velocityNedMps.y).whenInitialized(solution, 1), "m/s · horizontal"),
-        Metric("Heading", solution.eulerDeg.z.whenInitialized(solution, 1), "deg true"),
-    ))
-}
-
-@Composable
-private fun DashboardStatus(state: InsUiState) {
-    val stage = when {
-        state.solution.initialized -> "Initialization complete"
-        state.initializationInProgress -> "Initialization in progress"
-        else -> "Initialization not completed"
+internal fun DashboardStatus(state: InsUiState) {
+    val status = state.initializationStatus
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val background = when (status) {
+        InitializationStatus.IDLE -> if (dark) Color(0xFF383838) else Color(0xFFEEEEEE)
+        InitializationStatus.IN_PROGRESS -> if (dark) Color(0xFF4D3800) else Color(0xFFFFECB3)
+        InitializationStatus.COMPLETE -> if (dark) Color(0xFF123D24) else Color(0xFFDDF3E3)
+        InitializationStatus.FAILED -> if (dark) Color(0xFF571D22) else Color(0xFFFCE0E0)
     }
-    Card(Modifier.fillMaxWidth().testTag("initialization_status"), colors = CardDefaults.cardColors(
-        containerColor = if (state.forcedGnssOutage || state.solution.degraded || state.loggingError != null)
-            MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
-    )) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(stage, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text(navigationStatusText(state), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            Text("${if (state.csvLoggingEnabled) "CSV logging active" else "CSV logging stopped"} · ${state.outputRateHz.f(0)} Hz output", fontSize = 14.sp)
-            state.loggingError?.let { Text(it, fontSize = 14.sp, color = MaterialTheme.colorScheme.error) }
-            if (state.droppedLogRecords > 0) Text("Logging warning: ${state.droppedLogRecords} dropped records", fontSize = 14.sp, color = MaterialTheme.colorScheme.error)
-            if (state.initializationInProgress && !state.solution.initialized) {
-                InitializationProgressContent(state, "initialization_progress_text")
-                Text("Keep the phone still", fontSize = 14.sp)
-                if (state.coarseRollDeg.isFinite() && state.coarsePitchDeg.isFinite()) {
-                    Text("Coarse roll ${state.coarseRollDeg.f(1)}° · pitch ${state.coarsePitchDeg.f(1)}°", fontSize = 14.sp, modifier = Modifier.testTag("coarse_alignment"))
-                }
-            } else if (!state.solution.initialized) {
-                Text(if (state.serviceRunning) "Open Init to align navigation" else "Open More to start navigation", fontSize = 14.sp)
-                if (state.statusMessage.isNotBlank() && state.statusMessage != "Stopped") {
-                    Text(state.statusMessage, fontSize = 14.sp)
-                }
-            }
+    val foreground = when (status) {
+        InitializationStatus.IDLE -> if (dark) Color(0xFFE0E0E0) else Color(0xFF424242)
+        InitializationStatus.IN_PROGRESS -> if (dark) Color(0xFFFFD978) else Color(0xFF664500)
+        InitializationStatus.COMPLETE -> if (dark) Color(0xFFA8E8BB) else Color(0xFF155B2D)
+        InitializationStatus.FAILED -> if (dark) Color(0xFFFFB4B4) else Color(0xFF8B1720)
+    }
+    Surface(
+        color = background, contentColor = foreground, shape = MaterialTheme.shapes.small,
+        modifier = Modifier.testTag("initialization_status").semantics {
+            stateDescription = status.label
+        },
+    ) {
+        Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(status.icon, fontSize = 14.sp, modifier = Modifier.clearAndSetSemantics {})
+            Text(status.label, fontSize = 14.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
 
+@Composable
+private fun DashboardWarnings(state: InsUiState) {
+    // Aiding policy is shown by the switch, not by a second explanatory banner.
+    if (state.solution.initialized && !state.forcedGnssOutage &&
+        state.solution.qualityFlags and QualityFlag.GNSS_AIDING_SUSPENDED == 0 &&
+        (state.solution.degraded || state.solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0)) {
+        Text(navigationStatusText(state), fontSize = 14.sp, color = MaterialTheme.colorScheme.error)
+    }
+    state.loggingError?.let { Text(it, fontSize = 14.sp, color = MaterialTheme.colorScheme.error) }
+    if (state.droppedLogRecords > 0) {
+        Text("Logging warning: ${state.droppedLogRecords} dropped records", fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.error)
+    }
+}
 
-/** Shared 15-second countdown display used by the Dashboard card and the Init screen. */
+
+/** Alignment detail belongs on Init, not in the compact Dashboard indicator. */
 @Composable
 private fun InitializationProgressContent(state: InsUiState, textTag: String) {
     LinearProgressIndicator(
@@ -407,52 +400,24 @@ private fun GnssOutageControl(
     state: InsUiState,
     sendAction: (String, Map<String, Any>) -> Unit,
 ) {
-    val active = state.forcedGnssOutage
-    var showExplanation by rememberSaveable { mutableStateOf(false) }
-    Card(
-        modifier = Modifier.fillMaxWidth().testTag("gnss_outage_control"),
-        colors = if (active) {
-            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-        } else {
-            CardDefaults.cardColors()
-        },
+    val aidingEnabled = !state.forcedGnssOutage
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("gnss_outage_control"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            FilledTonalButton(
-                onClick = {
-                    sendAction(
-                        NavigationService.ACTION_FORCE_GNSS_OUTAGE,
-                        mapOf("enabled" to !active),
-                    )
-                },
-                enabled = state.serviceRunning && state.solution.initialized,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .testTag("gnss_outage_toggle")
-                    .semantics {
-                        contentDescription = "Forced GNSS outage control"
-                        stateDescription = if (active) "On" else "Off"
-                    },
-                colors = if (active) {
-                    ButtonDefaults.filledTonalButtonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError,
-                    )
-                } else {
-                    ButtonDefaults.filledTonalButtonColors()
-                },
-            ) {
-                Text(
-                    if (active) "Resume GNSS aiding" else "Begin forced GNSS outage",
-                    fontSize = 14.sp,
-                )
-            }
-            TextButton(onClick = { showExplanation = !showExplanation }, modifier = Modifier.heightIn(min = 48.dp)) {
-                Text(if (showExplanation) "Hide outage explanation" else "About outage testing", fontSize = 14.sp)
-            }
-            if (showExplanation) Text("Raw GNSS remains visible, streamed and logged while INS corrections are withheld.", fontSize = 14.sp)
-        }
+        Text("GNSS aiding", fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Switch(
+            checked = aidingEnabled,
+            onCheckedChange = { enabled ->
+                sendAction(NavigationService.ACTION_FORCE_GNSS_OUTAGE, mapOf("enabled" to !enabled))
+            },
+            enabled = state.serviceRunning && state.solution.initialized,
+            modifier = Modifier.heightIn(min = 48.dp).testTag("gnss_outage_toggle").semantics {
+                contentDescription = "GNSS aiding"
+                stateDescription = if (aidingEnabled) "On" else "Off"
+            },
+        )
     }
 }
 
@@ -606,6 +571,7 @@ internal fun PositionMapCard(
     }
 
     var mapUserNavigated by remember { mutableStateOf(false) }
+    var streetMapView by remember { mutableStateOf<MapBasemapView?>(null) }
     var recenterEpoch by remember { mutableIntStateOf(0) }
     val tileData = remember(mapState, trailVersion, headingKey, recenterEpoch) {
         MapBasemapData(
@@ -658,7 +624,7 @@ internal fun PositionMapCard(
             ) { Text(MapBasemap.GRID.label, fontSize = 14.sp) }
         }
         Card(Modifier.fillMaxWidth().testTag("position_map")) {
-            Box {
+            Box(Modifier.fillMaxWidth().clipToBounds()) {
             if (basemap == MapBasemap.TILES) {
                 key(dark, mapState) {
                     AndroidView(
@@ -667,6 +633,7 @@ internal fun PositionMapCard(
                             // MapView exists: its super constructor opens the cache database.
                             MapBasemapView.configureBeforeFirstMapView(context)
                             MapBasemapView(context).apply {
+                                streetMapView = this
                                 onUserNavigation = { mapUserNavigated = true }
                                 onAvailabilityChanged = { basemapAvailability = it }
                                 onResume()
@@ -677,7 +644,10 @@ internal fun PositionMapCard(
                             .heightIn(min = 240.dp)
                             .testTag("position_map_canvas")
                             .semantics { contentDescription = mapDescription },
-                        onRelease = { it.onPause() },
+                        onRelease = {
+                            if (streetMapView === it) streetMapView = null
+                            it.onPause()
+                        },
                         update = { view -> view.render(tileData, tilePalette) },
                     )
                 }
@@ -692,14 +662,30 @@ internal fun PositionMapCard(
                     update = { view -> view.render(plotData, plotPalette) },
                 )
             }
+            }
             if (basemap == MapBasemap.TILES) {
                 val uriHandler = LocalUriHandler.current
-                Surface(Modifier.align(Alignment.BottomEnd), color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)) {
-                    TextButton(onClick = { uriHandler.openUri("https://www.openstreetmap.org/copyright") }, modifier = Modifier.heightIn(min = 48.dp).testTag("map_attribution")) {
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("map_footer_controls"),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(
+                        onClick = { streetMapView?.zoomByUser(true) },
+                        modifier = Modifier.size(48.dp).testTag("map_zoom_in").semantics { contentDescription = "Zoom in" },
+                    ) { MapZoomSymbol(zoomIn = true) }
+                    IconButton(
+                        onClick = { streetMapView?.zoomByUser(false) },
+                        modifier = Modifier.size(48.dp).testTag("map_zoom_out").semantics { contentDescription = "Zoom out" },
+                    ) { MapZoomSymbol(zoomIn = false) }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(
+                        onClick = { uriHandler.openUri("https://www.openstreetmap.org/copyright") },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                        modifier = Modifier.heightIn(min = 48.dp).testTag("map_attribution"),
+                    ) {
                         Text("© OpenStreetMap contributors", fontSize = 12.sp)
                     }
                 }
-            }
             }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -762,6 +748,24 @@ internal fun PositionMapCard(
         }
         if (!insValid && !gnssValid) {
             Text("Start and initialize navigation to plot positions.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun MapZoomSymbol(zoomIn: Boolean) {
+    val color = LocalContentColor.current
+    val halo = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f)
+    Canvas(Modifier.size(18.dp)) {
+        val horizontalStart = androidx.compose.ui.geometry.Offset(1.dp.toPx(), size.height / 2)
+        val horizontalEnd = androidx.compose.ui.geometry.Offset(size.width - 1.dp.toPx(), size.height / 2)
+        drawLine(halo, horizontalStart, horizontalEnd, strokeWidth = 5.dp.toPx())
+        drawLine(color, horizontalStart, horizontalEnd, strokeWidth = 2.dp.toPx())
+        if (zoomIn) {
+            val verticalStart = androidx.compose.ui.geometry.Offset(size.width / 2, 1.dp.toPx())
+            val verticalEnd = androidx.compose.ui.geometry.Offset(size.width / 2, size.height - 1.dp.toPx())
+            drawLine(halo, verticalStart, verticalEnd, strokeWidth = 5.dp.toPx())
+            drawLine(color, verticalStart, verticalEnd, strokeWidth = 2.dp.toPx())
         }
     }
 }
@@ -834,6 +838,14 @@ internal fun RawDataScreen(state: InsUiState) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item { SectionTitle("Raw IMU · body FRD") }
+        item {
+            Text(when {
+                !state.solution.initialized -> "Bias learning · initialize first"
+                state.solution.qualityFlags and QualityFlag.IMU_CLIPPED != 0 -> "Bias learning paused · possible IMU clipping"
+                state.solution.qualityFlags and QualityFlag.BIAS_LEARNING_HELD != 0 -> "Bias learning paused · motion, IMU quality or recovery"
+                else -> "Clean IMU · gyro bias learning requires stillness"
+            }, fontSize = 14.sp, modifier = Modifier.testTag("bias_learning_status"))
+        }
         item {
             AdaptiveMetricGrid(listOf(
                 Metric("Accelerometer", imu?.accelerationMps2?.axes("X", "Y", "Z", 3) ?: "—", "m/s²"),
@@ -922,18 +934,23 @@ internal fun InitializationScreen(state: InsUiState, sendAction: (String, Map<St
                 enabled = state.serviceRunning,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("initialize_auto"),
             ) { Text("Begin automatic initialization", fontSize = 14.sp) }
-            if (state.initializationInProgress && !state.solution.initialized) {
-                // Mirror the dashboard countdown here so the user does not have to
-                // navigate back to see alignment progress after pressing the button.
+            if (state.initializationInProgress) {
                 Card(Modifier.fillMaxWidth().testTag("init_screen_progress")) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Initialization in progress", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                         InitializationProgressContent(state, "init_screen_progress_text")
+                        Text("Keep the phone still", fontSize = 14.sp)
+                        if (state.coarseRollDeg.isFinite() && state.coarsePitchDeg.isFinite()) {
+                            Text("Coarse roll ${state.coarseRollDeg.f(1)}° · pitch ${state.coarsePitchDeg.f(1)}°",
+                                fontSize = 14.sp, modifier = Modifier.testTag("coarse_alignment"))
+                        }
+                        Text(state.statusMessage, fontSize = 14.sp)
                     }
                 }
             }
         } else {
             ManualField("Latitude", latitude, { latitude = it }, "degrees", "manual_latitude")
+            Text("Stop moving and keep still for at least 3 seconds before applying. Fresh IMU samples are required for bias estimation.", fontSize = 14.sp)
             ManualField("Longitude", longitude, { longitude = it }, "degrees", "manual_longitude")
             ManualField("WGS84 ellipsoid altitude", altitude, { altitude = it }, "metres", "manual_altitude")
             ManualField("Roll", roll, { roll = it }, "degrees", "manual_roll")
@@ -950,6 +967,10 @@ internal fun InitializationScreen(state: InsUiState, sendAction: (String, Map<St
                 enabled = state.serviceRunning && valid,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("initialize_manual"),
             ) { Text("Apply manual initialization", fontSize = 14.sp) }
+        }
+        state.initializationError?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp,
+                modifier = Modifier.testTag("initialization_error"))
         }
         OutlinedButton(onClick = { sendAction(NavigationService.ACTION_RESET, emptyMap()) }, enabled = state.serviceRunning, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
             Text("Reset filter", fontSize = 14.sp)
@@ -1003,13 +1024,21 @@ internal fun SessionsScreen(
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("Deterministic simulator", fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                        Text("Debug builds only. Exercises repeatable motion with operator-controlled GNSS aiding.", fontSize = 14.sp)
+                        Text("Starts stationary. Initialize first, then start simulated motion. Reset filter returns to stationary.", fontSize = 14.sp)
                     }
                     Switch(checked = state.simulated, onCheckedChange = { sendAction(NavigationService.ACTION_SIMULATION, mapOf("enabled" to it)) }, enabled = state.serviceRunning && !replayOwnsService)
                 }
             }
         }
 
+        if (BuildConfig.SIMULATOR_AVAILABLE && state.simulated) {
+            FilledTonalButton(
+                onClick = { sendAction(NavigationService.ACTION_SIMULATED_MOTION, emptyMap()) },
+                enabled = state.serviceRunning && state.solution.initialized && !state.simulatedMotionRunning &&
+                    !state.initializationInProgress && state.initializationError == null && !state.replaying && !replayOwnsService,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("start_simulated_motion"),
+            ) { Text(if (state.simulatedMotionRunning) "Simulated motion running" else "Start simulated motion", fontSize = 14.sp) }
+        }
         SectionTitle("Motion profile")
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
             MotionProfile.entries.forEachIndexed { index, profile ->

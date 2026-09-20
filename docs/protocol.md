@@ -71,6 +71,13 @@ The final four bytes are the unsigned IEEE CRC-32 of the preceding 220 bytes. `p
 | 14 | Stationary zero-velocity/position constraint active |
 | 15 | Most recent fresh GNSS correction rejected |
 | 16 | Raw GNSS visible while aiding is intentionally suspended |
+| 17 | Bias learning held: IMU motion/quality window or clean-data recovery; GNSS position/velocity may remain aided |
+| 18 | Latest raw IMU sample is near the sensor's advertised measurement limit (possible clipping) |
+
+Bits 17–18 were added in v0.3.11 without changing frame size/version or CSV columns.
+CSV replay restores clipping from bit 18, but recomputes the bias-learning hold
+from raw samples. Old logs without this metadata cannot recover hardware clipping
+that was not recorded. Large finite motion samples are still propagated, not discarded.
 
 ## Golden frame
 

@@ -22,6 +22,7 @@ data class TimedImuSample(
     val accelerationMps2: Vec3,
     val angularRateRadps: Vec3,
     val fresh: Boolean = true,
+    val clipped: Boolean = false,
 )
 
 data class MagSample(val monotonicNanos: Long, val fieldMicroTesla: Vec3)
@@ -87,6 +88,8 @@ object QualityFlag {
     const val STATIONARY_CONSTRAINT = 1 shl 14
     const val GNSS_UPDATE_REJECTED = 1 shl 15
     const val GNSS_AIDING_SUSPENDED = 1 shl 16
+    const val BIAS_LEARNING_HELD = 1 shl 17
+    const val IMU_CLIPPED = 1 shl 18
 }
 
 data class NavigationSolution(

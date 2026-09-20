@@ -8,6 +8,13 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class CsvReplayFileTest {
+    @Test fun restoresClippingButDoesNotReuseRecordedBiasLearningDecision() {
+        val columns = CsvTrialLogger.HEADER.split(',')
+        val row = validValues(1_000_000_000L, true) + ("quality_flags" to
+            (com.example.phoneins.navigation.QualityFlag.IMU_CLIPPED or com.example.phoneins.navigation.QualityFlag.BIAS_LEARNING_HELD).toString())
+        assertTrue(CsvReplayIndex.open(writeCsv(columns, listOf(row))).row(0).imuClipped)
+        assertEquals(false, CsvReplayIndex.open(writeCsv(columns - "quality_flags", listOf(row))).row(0).imuClipped)
+    }
     @Test
     fun preservesHeldImuFlagAndAcceptsOlderLogsWithoutQualityFlags() {
         val columns = CsvTrialLogger.HEADER.split(',')

@@ -40,11 +40,11 @@ class GnssOutageControlUiTest {
         }
 
         composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("gnss_outage_toggle"))
-        composeRule.onNodeWithText("Begin forced GNSS outage").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("GNSS aiding").assertIsDisplayed()
         composeRule.onNodeWithTag("gnss_outage_toggle")
             .assertIsNotEnabled()
             .assertHeightIsAtLeast(48.dp)
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Off"))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "On"))
     }
 
     @Test
@@ -61,7 +61,7 @@ class GnssOutageControlUiTest {
         }
 
         composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("gnss_outage_toggle"))
-        composeRule.onNodeWithContentDescription("Forced GNSS outage control")
+        composeRule.onNodeWithContentDescription("GNSS aiding")
             .performScrollTo()
             .assertIsEnabled()
             .performClick()
@@ -87,12 +87,12 @@ class GnssOutageControlUiTest {
             }
         }
 
-        composeRule.onNodeWithText("Forced GNSS outage · raw fixes visible · dead reckoning")
-            .performScrollTo()
-            .assertIsDisplayed()
-        composeRule.onNodeWithText("Resume GNSS aiding").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("gnss_outage_toggle"))
+        composeRule.onNodeWithText("GNSS aiding").assertIsDisplayed()
+        composeRule.onNodeWithText("About outage testing").assertDoesNotExist()
+        composeRule.onNodeWithText("Resume GNSS aiding").assertDoesNotExist()
         composeRule.onNodeWithTag("gnss_outage_toggle")
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "On"))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Off"))
             .performClick()
         composeRule.runOnIdle { assertTrue(enabledExtra == false) }
     }

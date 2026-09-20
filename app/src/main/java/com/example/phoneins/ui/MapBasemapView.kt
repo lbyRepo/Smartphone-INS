@@ -20,6 +20,7 @@ import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.util.MapTileIndex
 import org.osmdroid.views.MapView
+import org.osmdroid.views.CustomZoomButtonsController
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
 import org.osmdroid.views.overlay.ScaleBarOverlay
@@ -145,6 +146,7 @@ internal class MapBasemapView(context: Context) : MapView(context) {
         setMaxZoomLevel(MAX_ZOOM_LEVEL)
         setTilesScaledToDpi(true)
         setMultiTouchControls(true)
+        zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
         controller.setZoom(INITIAL_ZOOM_LEVEL)
         insTrail.outlinePaint.apply {
             strokeWidth = TRAIL_WIDTH_DP * density
@@ -216,6 +218,11 @@ internal class MapBasemapView(context: Context) : MapView(context) {
 
         if (!userNavigated) fitIfNeeded(data)
         invalidate()
+    }
+
+    fun zoomByUser(zoomIn: Boolean) {
+        noteUserNavigation()
+        controller.setZoom((zoomLevelDouble + if (zoomIn) 1.0 else -1.0).coerceIn(MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL))
     }
 
     private fun noteUserNavigation() {

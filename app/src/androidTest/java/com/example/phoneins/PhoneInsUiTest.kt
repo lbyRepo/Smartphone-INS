@@ -6,6 +6,9 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.view.View
 import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -136,7 +139,9 @@ class PhoneInsUiTest {
     @Test
     fun dashboardShowsInitializationCompletionState() {
         composeRule.onNodeWithTag("initialization_status").assertIsDisplayed()
-        composeRule.onNodeWithText("Initialization not completed").assertIsDisplayed()
+        composeRule.onNodeWithTag("initialization_status")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Not initialized"))
+        composeRule.onNodeWithText("Waiting for initialization").assertDoesNotExist()
 
         composeRule.runOnIdle {
             InsRepository.update {
@@ -151,9 +156,13 @@ class PhoneInsUiTest {
                 )
             }
         }
-        composeRule.onNodeWithText("Initialization in progress").assertIsDisplayed()
-        composeRule.onNodeWithTag("initialization_progress_text").assertIsDisplayed()
-        composeRule.onNodeWithTag("coarse_alignment").assertIsDisplayed()
+        composeRule.onNodeWithText("Initializing").assertIsDisplayed()
+        composeRule.onNodeWithTag("initialization_progress_text").assertDoesNotExist()
+        composeRule.onNodeWithTag("coarse_alignment").assertDoesNotExist()
+        composeRule.onNodeWithTag("nav_initialize").performClick()
+        composeRule.onNodeWithTag("init_screen_progress_text").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("coarse_alignment").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("nav_dashboard").performClick()
 
         composeRule.runOnIdle {
             InsRepository.update { state ->
@@ -167,8 +176,26 @@ class PhoneInsUiTest {
                 )
             }
         }
-        composeRule.onNodeWithText("Initialization complete").assertIsDisplayed()
+        composeRule.onNodeWithText("Initialized").assertIsDisplayed()
         composeRule.onNodeWithTag("initialization_progress_text").assertDoesNotExist()
+    }
+
+    @Test
+    fun initializationFailureDetailsStayOnInitAndRetryClearsFailure() {
+        composeRule.runOnIdle {
+            InsRepository.update { it.copy(initializationError = "Invalid alignment pose") }
+        }
+        composeRule.onNodeWithText("Initialization failed").assertIsDisplayed()
+        composeRule.onNodeWithText("Invalid alignment pose").assertDoesNotExist()
+        composeRule.onNodeWithText("Waiting for initialization").assertDoesNotExist()
+        composeRule.onNodeWithTag("nav_initialize").performClick()
+        composeRule.onNodeWithTag("initialization_error").performScrollTo().assertIsDisplayed()
+        composeRule.runOnIdle {
+            InsRepository.update { it.copy(initializationError = null, initializationInProgress = true) }
+        }
+        composeRule.onNodeWithTag("nav_dashboard").performClick()
+        composeRule.onNodeWithText("Initializing").assertIsDisplayed()
+        composeRule.onNodeWithText("Initialization failed").assertDoesNotExist()
     }
 
     @Test
@@ -359,6 +386,8 @@ class PhoneInsUiTest {
                 )
             }
         }
-        composeRule.onNodeWithText("GNSS visible · aiding paused").assertIsDisplayed()
+        composeRule.onNodeWithText("GNSS visible · aiding paused").assertDoesNotExist()
+        composeRule.onNodeWithTag("dashboard").performScrollToNode(hasTestTag("gnss_outage_toggle"))
+        composeRule.onNodeWithTag("gnss_outage_toggle").assertIsDisplayed()
     }
 }

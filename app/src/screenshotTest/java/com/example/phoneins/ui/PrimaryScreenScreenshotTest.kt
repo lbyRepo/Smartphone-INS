@@ -1,6 +1,13 @@
 package com.example.phoneins.ui
 
 import android.content.res.Configuration
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Surface
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.example.phoneins.data.InsUiState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import com.example.phoneins.navigation.QualityFlag
@@ -77,3 +84,21 @@ fun SessionsScreenshot() = PreviewApp(Destination.SETTINGS)
 @Preview(name = "outage_large_font", widthDp = PHONE_WIDTH_DP, heightDp = PHONE_HEIGHT_DP, fontScale = 2f, showBackground = true)
 @Composable
 fun DashboardOutageScreenshot() = PreviewApp(Destination.DASHBOARD, outage = true)
+
+@PreviewTest
+@Preview(name = "states_light", widthDp = 411, heightDp = 230, showBackground = true)
+@Preview(name = "states_dark", widthDp = 411, heightDp = 230, uiMode = Configuration.UI_MODE_NIGHT_YES, showBackground = true)
+@Preview(name = "states_light_200", widthDp = 411, heightDp = 350, fontScale = 2f, showBackground = true)
+@Preview(name = "states_dark_200", widthDp = 411, heightDp = 350, fontScale = 2f, uiMode = Configuration.UI_MODE_NIGHT_YES, showBackground = true)
+@Composable
+fun InitializationIndicatorScreenshot() = PhoneInsTheme {
+    Surface {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            val idle = InsUiState()
+            DashboardStatus(idle)
+            DashboardStatus(idle.copy(initializationInProgress = true))
+            DashboardStatus(idle.copy(solution = idle.solution.copy(qualityFlags = QualityFlag.INITIALIZED)))
+            DashboardStatus(idle.copy(initializationError = "Invalid pose"))
+        }
+    }
+}

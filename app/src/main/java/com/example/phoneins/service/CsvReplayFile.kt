@@ -15,6 +15,7 @@ import java.util.Locale
 
 internal data class CsvReplayRow(
     val imuFresh: Boolean = true,
+    val imuClipped: Boolean = false,
     val sequence: Long,
     val monotonicNanos: Long,
     val unixMillis: Long,
@@ -218,6 +219,10 @@ internal class CsvReplayIndex private constructor(
                 }
             }
             return CsvReplayRow(
+                imuClipped = columns["quality_flags"]?.let { column ->
+                    val flags = values.getOrNull(column)?.toIntOrNull() ?: error("Invalid quality_flags at row $rowNumber")
+                    flags and QualityFlag.IMU_CLIPPED != 0
+                } ?: false,
                 imuFresh = columns["quality_flags"]?.let { column ->
                     val flags = values.getOrNull(column)?.toIntOrNull() ?: error("Invalid quality_flags at row $rowNumber")
                     flags and QualityFlag.IMU_HELD == 0

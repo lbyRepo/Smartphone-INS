@@ -5,6 +5,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ImuSamplePairerTest {
+    @Test fun clippingMetadataDoesNotDiscardRawMotion() {
+        val pairer = ImuSamplePairer()
+        val acceleration = Vec3(150.0, 0.0, -9.81)
+        pairer.accelerometer(1L, acceleration, clipped = true)
+        val result = pairer.gyroscope(2L, Vec3.ZERO)!!
+        assertTrue(result.clipped)
+        assertTrue(result.fresh)
+        assertEquals(acceleration, result.accelerationMps2)
+        pairer.accelerometer(3L, Vec3.ZERO)
+        assertTrue(pairer.gyroscope(4L, Vec3.ZERO, clipped = true)!!.clipped)
+        assertFalse(pairer.gyroscope(5L, Vec3.ZERO)!!.clipped)
+    }
     @Test fun missingStaleFutureAndOutOfOrderSamplesAreNotFresh() {
         val pairer = ImuSamplePairer()
         assertFalse(pairer.gyroscope(1L, Vec3.ZERO)!!.fresh)

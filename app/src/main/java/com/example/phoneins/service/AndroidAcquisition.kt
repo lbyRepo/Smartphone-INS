@@ -69,9 +69,11 @@ class AndroidAcquisition(
     override fun onSensorChanged(event: SensorEvent) {
         val native = Vec3(event.values[0].toDouble(), event.values[1].toDouble(), event.values[2].toDouble())
         val body = Vec3(native.y, native.x, -native.z)
+        val range = event.sensor.maximumRange.toDouble()
+        val clipped = range.isFinite() && range > 0 && native.toArray().any { kotlin.math.abs(it) >= 0.98 * range }
         when (event.sensor.type) {
-            Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_ACCELEROMETER_UNCALIBRATED -> imuPairer.accelerometer(event.timestamp, body)
-            Sensor.TYPE_GYROSCOPE, Sensor.TYPE_GYROSCOPE_UNCALIBRATED -> imuPairer.gyroscope(event.timestamp, body)?.let(onImu)
+            Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_ACCELEROMETER_UNCALIBRATED -> imuPairer.accelerometer(event.timestamp, body, clipped)
+            Sensor.TYPE_GYROSCOPE, Sensor.TYPE_GYROSCOPE_UNCALIBRATED -> imuPairer.gyroscope(event.timestamp, body, clipped)?.let(onImu)
             Sensor.TYPE_MAGNETIC_FIELD, Sensor.TYPE_MAGNETIC_FIELD_UNCALIBRATED -> onMag(MagSample(event.timestamp, body))
         }
     }

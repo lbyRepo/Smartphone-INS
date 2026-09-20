@@ -18,7 +18,7 @@ import com.example.phoneins.data.InsUiState
 import com.example.phoneins.data.TrialLogSummary
 import com.example.phoneins.service.NavigationService
 import com.example.phoneins.ui.PhoneInsTheme
-import com.example.phoneins.ui.SessionsScreen
+import com.example.phoneins.ui.SetupScreen
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -34,7 +34,7 @@ class CsvReplayUiTest {
         var extras: Map<String, Any> = emptyMap()
         composeRule.setContent {
             PhoneInsTheme {
-                SessionsScreen(replayState(), { sentAction, sentExtras ->
+                SetupScreen(replayState(), { sentAction, sentExtras ->
                     action = sentAction
                     extras = sentExtras
                 }) { choseFile = true }
@@ -55,7 +55,7 @@ class CsvReplayUiTest {
         var action: String? = null
         composeRule.setContent {
             PhoneInsTheme {
-                SessionsScreen(replayState(), { sentAction, _ -> action = sentAction })
+                SetupScreen(replayState(), { sentAction, _ -> action = sentAction })
             }
         }
 
@@ -71,7 +71,7 @@ class CsvReplayUiTest {
         composeRule.setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, 2f)) {
-                PhoneInsTheme { SessionsScreen(replayState(), { _, _ -> }) }
+                PhoneInsTheme { SetupScreen(replayState(), { _, _ -> }) }
             }
         }
 

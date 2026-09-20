@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.view.View
 import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -64,23 +65,21 @@ class PhoneInsUiTest {
         composeRule.onNodeWithTag("dashboard").assertIsDisplayed()
         composeRule.onNodeWithTag("nav_raw").performClick()
         composeRule.onNodeWithTag("raw_data").assertIsDisplayed()
-        composeRule.onNodeWithTag("nav_initialize").performClick()
-        composeRule.onNodeWithTag("initialization").assertIsDisplayed()
-        composeRule.onNodeWithTag("nav_settings").performClick()
-        composeRule.onNodeWithTag("sessions").assertIsDisplayed()
+        composeRule.onNodeWithTag("nav_setup").performClick()
+        composeRule.onNodeWithTag("setup").assertIsDisplayed()
     }
 
     @Test
     fun navigationHasSemanticsAndMinimumTouchTargets() {
         composeRule.onNodeWithContentDescription("Raw tab").assertIsDisplayed()
         composeRule.onNodeWithTag("nav_raw").assertHeightIsAtLeast(48.dp)
-        composeRule.onNodeWithTag("nav_settings").performClick()
+        composeRule.onNodeWithTag("nav_setup").performClick()
         composeRule.onNodeWithTag("service_toggle").assertHeightIsAtLeast(48.dp)
     }
 
     @Test
     fun manualInitializationRejectsInvalidCoordinates() {
-        composeRule.onNodeWithTag("nav_initialize").performClick()
+        composeRule.onNodeWithTag("nav_setup").performClick()
         composeRule.onNodeWithTag("init_manual_mode").performClick()
         composeRule.onNodeWithTag("manual_latitude").performTextReplacement("91")
         composeRule.onNodeWithTag("manual_error").performScrollTo().assertIsDisplayed()
@@ -88,19 +87,55 @@ class PhoneInsUiTest {
     }
 
     @Test
-    fun sessionsContentCanScrollToOutputDiagnostics() {
-        composeRule.onNodeWithTag("nav_settings").performClick()
-        composeRule.onNodeWithTag("output_links").performScrollTo().assertIsDisplayed()
+    fun connectionsSectionExpandsToAppInformation() {
+        composeRule.onNodeWithTag("nav_setup").performClick()
+        composeRule.onNodeWithTag("setup_section_connections").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("App version").assertDoesNotExist()
+        composeRule.onNodeWithTag("setup_section_connections").performClick()
+        composeRule.onNodeWithText("App version").performScrollTo().assertIsDisplayed()
     }
 
     @Test
-    fun storageFailuresAreVisibleInMorePage() {
+    fun storageFailuresAreVisibleInSetupEvenWhenCollapsed() {
         composeRule.runOnIdle {
             InsRepository.update { it.copy(loggingError = "Logging failed: Disk full", droppedLogRecords = 12) }
         }
-        composeRule.onNodeWithTag("nav_settings").performClick()
+        composeRule.onNodeWithTag("nav_setup").performClick()
+        // The collapsed section summary already surfaces the failure.
         composeRule.onNodeWithText("Logging failed: Disk full").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("setup_section_logging").performClick()
         composeRule.onNodeWithText("Dropped log records").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun setupRetainsEntriesAndExpandedSectionsAcrossTabSwitches() {
+        composeRule.onNodeWithTag("nav_setup").performClick()
+        composeRule.onNodeWithTag("setup_section_sensor").performScrollTo().performClick()
+        composeRule.onNodeWithTag("init_manual_mode").performScrollTo().performClick()
+        composeRule.onNodeWithTag("manual_latitude").performScrollTo().performTextReplacement("52.5200000")
+        composeRule.onNodeWithTag("nav_dashboard").performClick()
+        composeRule.onNodeWithTag("nav_setup").performClick()
+        // Manual mode, the entered value and the expanded sensor section all survive the switch.
+        composeRule.onNodeWithTag("manual_latitude").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("manual_latitude").assertTextContains("52.5200000")
+        composeRule.onNodeWithText("Motion profile").performScrollTo().assertIsDisplayed()
+        // Sections left untouched stay collapsed.
+        composeRule.onNodeWithText("App version").assertDoesNotExist()
+    }
+
+    @Test
+    fun initializationSectionReopensAfterAnInitializationError() {
+        composeRule.onNodeWithTag("nav_setup").performClick()
+        composeRule.onNodeWithText("Initialization").performClick()
+        composeRule.onNodeWithContentDescription("Initialization section")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Collapsed"))
+        composeRule.onNodeWithTag("initialization_error").assertDoesNotExist()
+        composeRule.runOnIdle {
+            InsRepository.update { it.copy(initializationError = "Invalid alignment pose") }
+        }
+        composeRule.onNodeWithTag("initialization_error").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Initialization section")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Expanded"))
     }
 
     @Test
@@ -159,7 +194,7 @@ class PhoneInsUiTest {
         composeRule.onNodeWithText("Initializing").assertIsDisplayed()
         composeRule.onNodeWithTag("initialization_progress_text").assertDoesNotExist()
         composeRule.onNodeWithTag("coarse_alignment").assertDoesNotExist()
-        composeRule.onNodeWithTag("nav_initialize").performClick()
+        composeRule.onNodeWithTag("nav_setup").performClick()
         composeRule.onNodeWithTag("init_screen_progress_text").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("coarse_alignment").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("nav_dashboard").performClick()
@@ -188,7 +223,7 @@ class PhoneInsUiTest {
         composeRule.onNodeWithText("Initialization failed").assertIsDisplayed()
         composeRule.onNodeWithText("Invalid alignment pose").assertDoesNotExist()
         composeRule.onNodeWithText("Waiting for initialization").assertDoesNotExist()
-        composeRule.onNodeWithTag("nav_initialize").performClick()
+        composeRule.onNodeWithTag("nav_setup").performClick()
         composeRule.onNodeWithTag("initialization_error").performScrollTo().assertIsDisplayed()
         composeRule.runOnIdle {
             InsRepository.update { it.copy(initializationError = null, initializationInProgress = true) }

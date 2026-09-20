@@ -72,12 +72,7 @@ fun RawDataScreenshot() = PreviewApp(Destination.RAW)
 @PreviewTest
 @PrimaryScreenMatrix
 @Composable
-fun InitializationScreenshot() = PreviewApp(Destination.INITIALIZE)
-
-@PreviewTest
-@PrimaryScreenMatrix
-@Composable
-fun SessionsScreenshot() = PreviewApp(Destination.SETTINGS)
+fun SetupScreenshot() = PreviewApp(Destination.SETUP)
 
 @PreviewTest
 @Preview(name = "outage_portrait", widthDp = PHONE_WIDTH_DP, heightDp = PHONE_HEIGHT_DP, showBackground = true)

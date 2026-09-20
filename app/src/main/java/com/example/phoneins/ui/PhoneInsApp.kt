@@ -2,6 +2,8 @@ package com.example.phoneins.ui
 
 import android.content.Context
 import android.content.res.Configuration
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.lazy.LazyColumn
@@ -12,6 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -70,7 +73,7 @@ fun PhoneInsTheme(content: @Composable () -> Unit) {
 }
 
 internal enum class Destination(val label: String, val glyph: String) {
-    DASHBOARD("INS", "◎"), RAW("Raw", "≋"), INITIALIZE("Init", "⌖"), SETTINGS("More", "⚙")
+    DASHBOARD("INS", "◎"), RAW("Raw", "≋"), SETUP("Setup", "⚙")
 }
 
 /** Basemap shown behind the position plot: cached online street tiles, or the plain grid. */
@@ -170,6 +173,9 @@ internal fun PhoneInsScaffold(
             }
         },
     ) { padding ->
+        // Each tab keeps its own saveable state (manual entries, expanded sections, scroll
+        // position) so switching tabs or recreating the activity restores the setup page.
+        val tabStateHolder = rememberSaveableStateHolder()
         Row(Modifier.fillMaxSize().padding(padding)) {
             if (wide) NavigationRail {
                 Spacer(Modifier.height(8.dp))
@@ -190,10 +196,15 @@ internal fun PhoneInsScaffold(
             }
             Box(Modifier.weight(1f).fillMaxHeight()) {
                 when (destination) {
-                    Destination.DASHBOARD -> DashboardScreen(state, positionMapState, sendAction, mapBasemap, onMapBasemapChange)
-                    Destination.RAW -> RawDataScreen(state)
-                    Destination.INITIALIZE -> InitializationScreen(state, sendAction)
-                    Destination.SETTINGS -> SessionsScreen(state, sendAction, chooseCsv)
+                    Destination.DASHBOARD -> tabStateHolder.SaveableStateProvider("dashboard") {
+                        DashboardScreen(state, positionMapState, sendAction, mapBasemap, onMapBasemapChange)
+                    }
+                    Destination.RAW -> tabStateHolder.SaveableStateProvider("raw") {
+                        RawDataScreen(state)
+                    }
+                    Destination.SETUP -> tabStateHolder.SaveableStateProvider("setup") {
+                        SetupScreen(state, sendAction, chooseCsv)
+                    }
                 }
             }
         }
@@ -897,7 +908,154 @@ internal fun RawDataScreen(state: InsUiState) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun InitializationScreen(state: InsUiState, sendAction: (String, Map<String, Any>) -> Unit) {
+internal fun SetupScreen(
+    state: InsUiState,
+    sendAction: (String, Map<String, Any>) -> Unit,
+    chooseCsv: () -> Unit = {},
+) {
+    var initializationExpanded by rememberSaveable { mutableStateOf(true) }
+    var sensorSourceExpanded by rememberSaveable { mutableStateOf(false) }
+    var trialLoggingExpanded by rememberSaveable { mutableStateOf(false) }
+    var csvReplayExpanded by rememberSaveable { mutableStateOf(false) }
+    var advancedExpanded by rememberSaveable { mutableStateOf(false) }
+    var connectionsExpanded by rememberSaveable { mutableStateOf(false) }
+
+    // Surface what the operator needs to act on: alignment runs and failures open the
+    // initialization section, a selected log opens the replay section.
+    LaunchedEffect(state.initializationInProgress, state.initializationError) {
+        if (state.initializationInProgress || state.initializationError != null) initializationExpanded = true
+    }
+    LaunchedEffect(state.csvReplay.selectedLogName, state.csvReplay.phase) {
+        if (state.csvReplay.selectedLogName != null && state.csvReplay.phase != CsvReplayPhase.IDLE) csvReplayExpanded = true
+    }
+
+    val profileLabel = state.solution.motionProfile.name.lowercase().replaceFirstChar { it.titlecase() }
+    val loggingSummary = when {
+        state.loggingError != null -> state.loggingError
+        state.csvLoggingEnabled -> "Active · ${state.csvLogFileName ?: "starting"}"
+        else -> "Stopped"
+    }
+    val replaySummary = when {
+        state.csvReplay.phase == CsvReplayPhase.ERROR -> state.csvReplay.message ?: "Replay error"
+        state.csvReplay.selectedLogName != null ->
+            "${state.csvReplay.phase.name.lowercase().replaceFirstChar(Char::titlecase)} · ${state.csvReplay.selectedLogName}"
+        else -> "No log selected"
+    }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).testTag("setup"),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Button(
+            onClick = { sendAction(if (state.serviceRunning) NavigationService.ACTION_STOP else NavigationService.ACTION_START, emptyMap()) },
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("service_toggle"),
+            colors = if (state.serviceRunning) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error) else ButtonDefaults.buttonColors(),
+        ) { Text(if (state.serviceRunning) "Stop navigation service" else "Start navigation service", fontSize = 14.sp) }
+
+        SetupSection(
+            title = "Initialization",
+            tag = "setup_section_initialization",
+            expanded = initializationExpanded,
+            onToggle = { initializationExpanded = !initializationExpanded },
+            summary = state.initializationStatus.label,
+            summaryIsError = state.initializationError != null,
+        ) { InitializationSectionContent(state, sendAction) }
+
+        SetupSection(
+            title = "Sensor source and motion profile",
+            tag = "setup_section_sensor",
+            expanded = sensorSourceExpanded,
+            onToggle = { sensorSourceExpanded = !sensorSourceExpanded },
+            summary = if (BuildConfig.SIMULATOR_AVAILABLE && state.simulated) "Simulator on · $profileLabel profile" else "$profileLabel profile",
+        ) { SensorSourceSectionContent(state, sendAction) }
+
+        SetupSection(
+            title = "Trial logging",
+            tag = "setup_section_logging",
+            expanded = trialLoggingExpanded,
+            onToggle = { trialLoggingExpanded = !trialLoggingExpanded },
+            summary = loggingSummary,
+            summaryIsError = state.loggingError != null,
+        ) { TrialLoggingSectionContent(state) }
+
+        SetupSection(
+            title = "CSV trial replay",
+            tag = "setup_section_replay",
+            expanded = csvReplayExpanded,
+            onToggle = { csvReplayExpanded = !csvReplayExpanded },
+            summary = replaySummary,
+            summaryIsError = state.csvReplay.phase == CsvReplayPhase.ERROR,
+        ) { CsvReplaySectionContent(state, sendAction, chooseCsv) }
+
+        SetupSection(
+            title = "Advanced recording and demo replay",
+            tag = "setup_section_advanced",
+            expanded = advancedExpanded,
+            onToggle = { advancedExpanded = !advancedExpanded },
+            summary = if (state.recording) "Binary recording active" else null,
+        ) { AdvancedRecordingSectionContent(state, sendAction) }
+
+        SetupSection(
+            title = "Connections and app information",
+            tag = "setup_section_connections",
+            expanded = connectionsExpanded,
+            onToggle = { connectionsExpanded = !connectionsExpanded },
+        ) { ConnectionsSectionContent(state) }
+    }
+}
+
+/** Expandable card with an always-visible summary line and accessible expanded/collapsed state. */
+@Composable
+private fun SetupSection(
+    title: String,
+    tag: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    summary: String? = null,
+    summaryIsError: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    Card(modifier.fillMaxWidth().testTag(tag)) {
+        Column {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .clickable(onClickLabel = if (expanded) "Collapse section" else "Expand section") { onToggle() }
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                    .semantics {
+                        contentDescription = "$title section"
+                        stateDescription = if (expanded) "Expanded" else "Collapsed"
+                    },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    summary?.let {
+                        Text(
+                            it,
+                            fontSize = 12.sp,
+                            color = if (summaryIsError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Text(if (expanded) "▾" else "▸", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) { content() }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun InitializationSectionContent(state: InsUiState, sendAction: (String, Map<String, Any>) -> Unit) {
     var manual by rememberSaveable { mutableStateOf(false) }
     var latitude by rememberSaveable { mutableStateOf("1.3521000") }
     var longitude by rememberSaveable { mutableStateOf("103.8198000") }
@@ -909,11 +1067,7 @@ internal fun InitializationScreen(state: InsUiState, sendAction: (String, Map<St
     val values = listOf(latitude, longitude, altitude, roll, pitch, yaw).map { it.toDoubleOrNull() }
     val valid = values.all { it != null } && values[0]!! in -90.0..90.0 && values[1]!! in -180.0..180.0 && values[4]!! in -90.0..90.0
 
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).testTag("initialization"),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        SectionTitle("Initialize navigation")
+    Column(Modifier.fillMaxWidth().testTag("initialization"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Screen up · top edge forward. Keep still for 15 s during automatic alignment.", fontSize = 14.sp)
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
             SegmentedButton(selected = !manual, onClick = { manual = false }, shape = SegmentedButtonDefaults.itemShape(0, 2), modifier = Modifier.heightIn(min = 56.dp).testTag("init_auto_mode")) { Text("Automatic", fontSize = 14.sp) }
@@ -972,7 +1126,7 @@ internal fun InitializationScreen(state: InsUiState, sendAction: (String, Map<St
             Text(it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp,
                 modifier = Modifier.testTag("initialization_error"))
         }
-        OutlinedButton(onClick = { sendAction(NavigationService.ACTION_RESET, emptyMap()) }, enabled = state.serviceRunning, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+        OutlinedButton(onClick = { sendAction(NavigationService.ACTION_RESET, emptyMap()) }, enabled = state.serviceRunning, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("reset_filter")) {
             Text("Reset filter", fontSize = 14.sp)
         }
     }
@@ -993,44 +1147,25 @@ private fun ManualField(label: String, value: String, changed: (String) -> Unit,
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun SessionsScreen(
-    state: InsUiState,
-    sendAction: (String, Map<String, Any>) -> Unit,
-    chooseCsv: () -> Unit = {},
-) {
+private fun SensorSourceSectionContent(state: InsUiState, sendAction: (String, Map<String, Any>) -> Unit) {
     val replayOwnsService = state.csvReplay.phase in setOf(
         CsvReplayPhase.PLAYING,
         CsvReplayPhase.PAUSED,
         CsvReplayPhase.SEEKING,
         CsvReplayPhase.COMPLETED,
     )
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).testTag("sessions"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionTitle("Run control")
-        Button(
-            onClick = { sendAction(if (state.serviceRunning) NavigationService.ACTION_STOP else NavigationService.ACTION_START, emptyMap()) },
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("service_toggle"),
-            colors = if (state.serviceRunning) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error) else ButtonDefaults.buttonColors(),
-        ) { Text(if (state.serviceRunning) "Stop navigation service" else "Start navigation service", fontSize = 14.sp) }
-
-        SectionTitle("Trial logging")
-        KeyValueRow("CSV trial logging", if (state.csvLoggingEnabled) "Active · ${formatReplayTime(state.csvLogElapsedMillis)} elapsed" else "Stopped")
-        state.loggingError?.let { KeyValueRow("Logging error", it) }
-        KeyValueRow("Dropped log records", state.droppedLogRecords.toString())
-        KeyValueRow("CSV log file", state.csvLogFileName ?: "Start navigation to create a dated CSV")
-        Text("CSV logging is automatic. Binary recording below is a separate file.", fontSize = 14.sp)
-
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         if (BuildConfig.SIMULATOR_AVAILABLE) {
             Card(Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("Deterministic simulator", fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                        Text("Starts stationary. Initialize first, then start simulated motion. Reset filter returns to stationary.", fontSize = 14.sp)
+                        Text("Deterministic simulator", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("Starts stationary. Initialize first, then start simulated motion. Reset filter returns to stationary.", fontSize = 12.sp)
                     }
                     Switch(checked = state.simulated, onCheckedChange = { sendAction(NavigationService.ACTION_SIMULATION, mapOf("enabled" to it)) }, enabled = state.serviceRunning && !replayOwnsService)
                 }
             }
         }
-
         if (BuildConfig.SIMULATOR_AVAILABLE && state.simulated) {
             FilledTonalButton(
                 onClick = { sendAction(NavigationService.ACTION_SIMULATED_MOTION, emptyMap()) },
@@ -1039,7 +1174,7 @@ internal fun SessionsScreen(
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("start_simulated_motion"),
             ) { Text(if (state.simulatedMotionRunning) "Simulated motion running" else "Start simulated motion", fontSize = 14.sp) }
         }
-        SectionTitle("Motion profile")
+        Text("Motion profile", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
             MotionProfile.entries.forEachIndexed { index, profile ->
                 SegmentedButton(
@@ -1051,10 +1186,37 @@ internal fun SessionsScreen(
                 ) { Text(profile.name.lowercase().replaceFirstChar { it.titlecase() }, fontSize = 14.sp) }
             }
         }
+    }
+}
 
-        CsvReplaySection(state, sendAction, chooseCsv)
+@Composable
+private fun TrialLoggingSectionContent(state: InsUiState) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        AdaptiveKeyValueRow("CSV trial logging", if (state.csvLoggingEnabled) "Active · ${formatReplayTime(state.csvLogElapsedMillis)} elapsed" else "Stopped")
+        state.loggingError?.let { AdaptiveKeyValueRow("Logging error", it, valueIsError = true) }
+        AdaptiveKeyValueRow("Dropped log records", state.droppedLogRecords.toString())
+        AdaptiveKeyValueRow("CSV log file", state.csvLogFileName ?: "Start navigation to create a dated CSV")
+        state.csvLogPath?.let { path ->
+            Text(
+                "CSV path: $path",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("csv_log_path"),
+            )
+        }
+        Text("CSV logging is automatic. Binary recording in the advanced section is a separate file.", fontSize = 14.sp)
+    }
+}
 
-        SectionTitle("Advanced · binary recording and demo replay")
+@Composable
+private fun AdvancedRecordingSectionContent(state: InsUiState, sendAction: (String, Map<String, Any>) -> Unit) {
+    val replayOwnsService = state.csvReplay.phase in setOf(
+        CsvReplayPhase.PLAYING,
+        CsvReplayPhase.PAUSED,
+        CsvReplayPhase.SEEKING,
+        CsvReplayPhase.COMPLETED,
+    )
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         FilledTonalButton(onClick = { sendAction(NavigationService.ACTION_RECORDING, mapOf("enabled" to !state.recording)) }, enabled = state.serviceRunning && !replayOwnsService, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
             Text(if (state.recording) "Stop binary recording" else "Start binary recording", fontSize = 14.sp)
         }
@@ -1074,26 +1236,22 @@ internal fun SessionsScreen(
                 }
             }
         }
-
-        Text("Output links", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp).testTag("output_links"))
-        KeyValueRow("TCP server", if (state.tcpConnected) "Client connected · :29500" else "Listening on :29500")
-        KeyValueRow("Android accessory", if (state.aoaConnected) "Connected" else "Not connected")
-        KeyValueRow("Protocol", "INS1 · 224-byte binary · CRC-32")
-        state.csvLogPath?.let { path ->
-            Text(
-                "CSV path: $path",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.testTag("csv_log_path"),
-            )
-        }
-        KeyValueRow("Mounting", "Screen up · top edge forward")
-        KeyValueRow("App version", BuildConfig.VERSION_NAME)
     }
 }
 
 @Composable
-private fun CsvReplaySection(
+private fun ConnectionsSectionContent(state: InsUiState) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        AdaptiveKeyValueRow("TCP server", if (state.tcpConnected) "Client connected · :29500" else "Listening on :29500")
+        AdaptiveKeyValueRow("Android accessory", if (state.aoaConnected) "Connected" else "Not connected")
+        AdaptiveKeyValueRow("Protocol", "INS1 · 224-byte binary · CRC-32")
+        AdaptiveKeyValueRow("Mounting", "Screen up · top edge forward")
+        AdaptiveKeyValueRow("App version", BuildConfig.VERSION_NAME)
+    }
+}
+
+@Composable
+private fun CsvReplaySectionContent(
     state: InsUiState,
     sendAction: (String, Map<String, Any>) -> Unit,
     chooseCsv: () -> Unit,
@@ -1105,7 +1263,6 @@ private fun CsvReplaySection(
         CsvReplayPhase.SEEKING,
         CsvReplayPhase.COMPLETED,
     )
-    SectionTitle("CSV trial replay")
     Text(
         "Re-run logged raw IMU and GNSS through the current navigation algorithm.",
         fontSize = 14.sp,
@@ -1249,11 +1406,22 @@ private fun formatFileSize(bytes: Long): String = when {
     else -> "$bytes B"
 }
 
+/** Label/value detail row: side by side at normal widths, stacked when space is tight. */
 @Composable
-private fun KeyValueRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(label, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(0.42f))
-        Text(value, fontSize = 14.sp, modifier = Modifier.weight(0.58f))
+private fun AdaptiveKeyValueRow(label: String, value: String, valueIsError: Boolean = false) {
+    val valueColor = if (valueIsError) MaterialTheme.colorScheme.error else Color.Unspecified
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth >= 340.dp) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(label, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(0.42f))
+                Text(value, fontSize = 14.sp, color = valueColor, modifier = Modifier.weight(0.58f))
+            }
+        } else {
+            Column(Modifier.fillMaxWidth()) {
+                Text(label, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(value, fontSize = 14.sp, color = valueColor)
+            }
+        }
     }
 }
 

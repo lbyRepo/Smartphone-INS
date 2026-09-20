@@ -31,13 +31,13 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 
 ## Project status
 
-Current app version: `0.3.14`.
+Current app version: `0.3.15`.
 
 Street-map zoom controls now use small transparent icons in the grey footer below
 the map while retaining 48 dp touch targets. OpenStreetMap attribution remains on
 the footer's right side, leaving the map itself unobstructed.
 
-The deterministic simulator now stays stationary until **More → Start simulated
+The deterministic simulator now stays stationary until **Setup → Start simulated
 motion** is pressed after initialization. **Init → Reset filter** restarts its
 stationary state. Simulator truth starts at 1.3521° N, 103.8198° E, 25 m, level and
 north-facing; use that pose for manual simulator alignment. Manual bias estimation
@@ -60,7 +60,7 @@ See [rough-road protection](docs/rough-road-bias-protection-v0.3.11.md) for limi
 
 Version 0.3.9 replaces the Dashboard initialization banner with one compact,
 colour-coded indicator and a plain GNSS aiding switch. Alignment details remain
-on Init; logging details remain on More.
+on Setup; logging details remain in the Setup trial logging section.
 
 Version 0.3.8 streamlines the Dashboard, adds a landscape map/summary layout,
 labels individual measurement axes, and distinguishes automatic CSV logging from
@@ -149,7 +149,7 @@ Then:
 3. Start the foreground service.
 4. Choose automatic initialization or enter manual initialization values.
 5. Keep the phone still during the 15-second automatic initialization window.
-6. View the Dashboard, Raw Data, Initialization, and Sessions/Settings screens.
+6. View the Dashboard (INS), Raw Data, and Setup screens. Initialization, sensor source, trial logging, replay and connection details live in Setup.
 
 For indoor demos where GNSS is weak, use the deterministic replay mode so the UI, logging, and output pipeline can still be exercised repeatably.
 
@@ -182,7 +182,7 @@ Each CSV row corresponds to the app’s 100 Hz output stream and includes:
 
 ### Reprocess a logged trial
 
-Open **More → CSV trial replay** to select one of the recent completed logs, or choose a CSV through Android's document picker. The app rebuilds the navigation solution from the logged raw IMU and GNSS using the current algorithm.
+Open **Setup → CSV trial replay** to select one of the recent completed logs, or choose a CSV through Android's document picker. The app rebuilds the navigation solution from the logged raw IMU and GNSS using the current algorithm.
 
 Replay supports pause, seek, restart, and `0.5×`, `1×`, `2×`, and `10×` speeds. The Dashboard, Raw Data page, position map, TCP, and USB output follow the reprocessed solution. Results are saved separately without modifying the source log:
 
@@ -275,7 +275,7 @@ and a separate reference trajectory, including mounting, timing and lever-arm ca
 
 Live CSV and binary recording use bounded background queues (1,000 records per file).
 Slow storage cannot block the 100 Hz publisher: queue overflow drops the newest record
-and increments **Dropped log records** on the More page. Storage failures stop the affected
+and increments **Dropped log records** on the Setup page. Storage failures stop the affected
 logger and display **Logging error** without stopping navigation. A shutdown drains accepted
 records, waiting up to two seconds; an unfinished drain is reported and the file may still
 be incomplete. CSV algorithm replay remains lossless and writes synchronously on its own

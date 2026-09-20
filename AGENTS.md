@@ -21,3 +21,45 @@
   (location fine/coarse, notifications).
 - Verify the activity actually resumed (`adb shell dumpsys activity activities`) and say which
   screen or flow to look at; leave the emulator on that state when practical.
+
+## Mandatory 45-second GNSS outage verification
+
+Run this verification whenever changes affect sensor processing, initialization, navigation,
+GNSS aiding, or replay. Use logged or playback sensor data and the current navigation algorithm.
+
+### Procedure
+
+- Reprocess raw IMU and GNSS measurements. Recorded INS outputs must not substitute for
+  recomputing the navigation solution.
+- Select a reproducible moving segment with valid GNSS reference measurements covering the
+  full outage. Record the source file and chosen interval before evaluating results.
+- Initialize and establish GNSS-aided navigation, then disable aiding for exactly **45 seconds
+  of recorded sensor time**, independent of playback speed or wall-clock time.
+- Continue collecting raw GNSS for comparison. Verify that it does not correct INS position,
+  velocity, heading, or stationary constraints during the outage.
+- Measure the outage endpoint before reacquisition, then restore aiding and verify that
+  corrections resume.
+
+### Acceptance criteria
+
+- **Horizontal separation:** maximum INS–GNSS horizontal separation throughout the outage,
+  including the endpoint before reacquisition, must be **≤150 m**. Compute errors at matched
+  timestamps using WGS84 ECEF-to-local-ENU conversion and `sqrt(E² + N²)`.
+- **Direction:** at each valid matched GNSS epoch where horizontal GNSS speed is **≥1 m/s**,
+  the angle between the INS and GNSS horizontal velocity vectors must be **≤30°**. Zero or
+  invalid INS velocity at those epochs fails the check.
+- Compare against the contemporaneous GNSS velocity vector, including during turns.
+- Missing reference coverage, an incomplete outage, or insufficient moving data makes the
+  result **inconclusive**, never a pass.
+- Describe 150 m as a displacement-error limit, not a drift rate.
+
+### Evidence and failure handling
+
+- Save a verification report containing the source, replay interval, initialization, maximum
+  and endpoint horizontal error, maximum direction error, evaluated sample count,
+  reacquisition result, and explicit pass/fail/inconclusive status.
+- Include trajectory and error-versus-time plots with the outage boundaries marked.
+- Report failed checks explicitly. Do not relax thresholds, shorten the outage, or change
+  the selected interval merely to obtain a pass.
+- This rule establishes a verification requirement; its presence does not mean the current
+  application has passed it. Documentation-only changes do not themselves require this test.

@@ -31,7 +31,7 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 
 ## Project status
 
-Current app version: `0.3.13`.
+Current app version: `0.3.14`.
 
 Street-map zoom controls now use small transparent icons in the grey footer below
 the map while retaining 48 dp touch targets. OpenStreetMap attribution remains on

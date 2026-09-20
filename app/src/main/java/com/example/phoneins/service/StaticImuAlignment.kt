@@ -10,9 +10,12 @@ internal fun staticImuMeans(samples: List<TimedImuSample>, nowNanos: Long): Pair
     require(samples.size >= 300 && samples.last().monotonicNanos - samples.first().monotonicNanos >= 2_900_000_000L) {
         "Keep still for at least 3 seconds before applying manual initialization (300 fresh IMU samples required)."
     }
+    // 150 ms tolerates one dropped sample on sensors capped at 100 Hz (the emulator's
+    // virtual IMU drops ~one sample per window, yielding 105-110 ms gaps); anything
+    // sparser than that is still treated as stale or incomplete.
     require(nowNanos - samples.last().monotonicNanos in 0L..100_000_000L &&
         samples.all { it.fresh && !it.clipped && it.accelerationMps2.toArray().all(Double::isFinite) && it.angularRateRadps.toArray().all(Double::isFinite) } &&
-        samples.zipWithNext().all { (a, b) -> b.monotonicNanos - a.monotonicNanos in 1L..100_000_000L }) {
+        samples.zipWithNext().all { (a, b) -> b.monotonicNanos - a.monotonicNanos in 1L..150_000_000L }) {
         "IMU samples are stale or incomplete. Keep still and retry."
     }
     val acceleration = samples.fold(Vec3.ZERO) { sum, s -> sum + s.accelerationMps2 } / samples.size.toDouble()

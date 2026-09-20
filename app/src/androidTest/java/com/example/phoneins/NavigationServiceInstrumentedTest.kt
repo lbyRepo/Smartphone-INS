@@ -66,15 +66,31 @@ class NavigationServiceInstrumentedTest {
             InsRepository.state.value.initializationError == null && InsRepository.state.value.initializationInProgress
         }
         Thread.sleep(3_500) // Manual bias estimation needs a fresh stationary window.
-        startService(NavigationService.ACTION_INITIALIZE_MANUAL) {
-            putExtra("latitude", 1.3521)
-            putExtra("longitude", 103.8198)
-            putExtra("altitude", 10.0)
-            putExtra("roll", 0.0)
-            putExtra("pitch", 0.0)
-            putExtra("yaw", 0.0)
+        // A loaded emulator can transiently deliver IMU with gaps above 100 ms, which
+        // rejects a single alignment attempt with "IMU samples are stale or incomplete".
+        // An operator would simply retry, so retry once a second until it qualifies.
+        fun attemptManualAlignment() {
+            startService(NavigationService.ACTION_INITIALIZE_MANUAL) {
+                putExtra("latitude", 1.3521)
+                putExtra("longitude", 103.8198)
+                putExtra("altitude", 10.0)
+                putExtra("roll", 0.0)
+                putExtra("pitch", 0.0)
+                putExtra("yaw", 0.0)
+            }
         }
-        await(5_000) { InsRepository.state.value.solution.initialized }
+        var lastManualAttempt = System.nanoTime()
+        attemptManualAlignment()
+        await(30_000) {
+            val state = InsRepository.state.value
+            if (!state.solution.initialized && !state.initializationInProgress &&
+                System.nanoTime() - lastManualAttempt >= 1_000_000_000L
+            ) {
+                lastManualAttempt = System.nanoTime()
+                attemptManualAlignment()
+            }
+            state.solution.initialized
+        }
         assertEquals(null, InsRepository.state.value.initializationError)
         startService(NavigationService.ACTION_RESET)
         await(5_000) { !InsRepository.state.value.solution.initialized }

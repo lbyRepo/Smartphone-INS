@@ -46,7 +46,7 @@ data class GnssFix(
 )
 
 enum class MotionProfile { VEHICLE, PEDESTRIAN }
-enum class InitSource { NONE, AUTOMATIC, MANUAL, REPLAY }
+enum class InitSource { NONE, AUTOMATIC, MANUAL, REPLAY, TRANSFER }
 enum class FixStatus { NO_FIX, FIX_2D, FIX_3D, STALE }
 
 data class ManualInitialization(
@@ -112,6 +112,10 @@ data class NavigationSolution(
     val sequence: Long = 0,
     val accelerometerBiasMps2: Vec3 = Vec3.ZERO,
     val gyroBiasRadps: Vec3 = Vec3.ZERO,
+    val alignmentPhase: AlignmentPhase = AlignmentPhase.NONE,
+    val alignmentMessage: String = "",
+    val mountingEulerDeg: Vec3 = Vec3.ZERO,
+    val mountingStdDeg: Vec3 = Vec3(Double.NaN, Double.NaN, Double.NaN),
 ) {
     val initialized get() = qualityFlags and QualityFlag.INITIALIZED != 0
     val degraded get() = qualityFlags and QualityFlag.DEGRADED != 0
@@ -124,3 +128,6 @@ data class NavigationSolution(
         )
     }
 }
+
+/** Alignment process state for the transfer-alignment (master INS) mode. */
+enum class AlignmentPhase { NONE, ALIGNING, READY }

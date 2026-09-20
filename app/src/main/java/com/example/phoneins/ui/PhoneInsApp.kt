@@ -400,8 +400,8 @@ private fun navigationStatusText(state: InsUiState): String {
         solution.degraded -> "Dead reckoning · GNSS stale"
         solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> "GNSS fix present · aiding rejected"
         solution.qualityFlags and QualityFlag.STATIONARY_CONSTRAINT != 0 -> "GNSS-aided · stationary hold"
-        solution.qualityFlags and QualityFlag.HEADING_COURSE_AIDED != 0 -> "Heading aided by GNSS"
-        solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0 -> "GNSS-aided · heading coasting"
+        solution.qualityFlags and QualityFlag.HEADING_COURSE_AIDED != 0 -> "Legacy course aid active"
+        solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0 -> "GNSS-aided · coupled correction"
         else -> "GNSS fix present · awaiting correction"
     }
 }
@@ -953,7 +953,7 @@ internal fun SetupScreen(
         ) { Text(if (state.serviceRunning) "Stop navigation service" else "Start navigation service", fontSize = 14.sp) }
 
         SetupSection(
-            title = "Initialization",
+            title = "Alignment",
             tag = "setup_section_initialization",
             expanded = initializationExpanded,
             onToggle = { initializationExpanded = !initializationExpanded },
@@ -1056,7 +1056,8 @@ private fun SetupSection(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun InitializationSectionContent(state: InsUiState, sendAction: (String, Map<String, Any>) -> Unit) {
-    var manual by rememberSaveable { mutableStateOf(false) }
+    var alignmentMode by rememberSaveable { mutableIntStateOf(0) }
+    val manual = alignmentMode == 1
     var latitude by rememberSaveable { mutableStateOf("1.3521000") }
     var longitude by rememberSaveable { mutableStateOf("103.8198000") }
     var altitude by rememberSaveable { mutableStateOf("25.0") }
@@ -1070,8 +1071,9 @@ private fun InitializationSectionContent(state: InsUiState, sendAction: (String,
     Column(Modifier.fillMaxWidth().testTag("initialization"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Screen up · top edge forward. Keep still for 15 s during automatic alignment.", fontSize = 14.sp)
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-            SegmentedButton(selected = !manual, onClick = { manual = false }, shape = SegmentedButtonDefaults.itemShape(0, 2), modifier = Modifier.heightIn(min = 56.dp).testTag("init_auto_mode")) { Text("Automatic", fontSize = 14.sp) }
-            SegmentedButton(selected = manual, onClick = { manual = true }, shape = SegmentedButtonDefaults.itemShape(1, 2), modifier = Modifier.heightIn(min = 56.dp).testTag("init_manual_mode")) { Text("Manual", fontSize = 14.sp) }
+            SegmentedButton(selected = alignmentMode == 0, onClick = { alignmentMode = 0 }, shape = SegmentedButtonDefaults.itemShape(0, 3), modifier = Modifier.heightIn(min = 56.dp).testTag("init_auto_mode")) { Text("Automatic", fontSize = 14.sp) }
+            SegmentedButton(selected = alignmentMode == 1, onClick = { alignmentMode = 1 }, shape = SegmentedButtonDefaults.itemShape(1, 3), modifier = Modifier.heightIn(min = 56.dp).testTag("init_manual_mode")) { Text("Manual", fontSize = 14.sp) }
+            SegmentedButton(selected = alignmentMode == 2, onClick = { alignmentMode = 2 }, shape = SegmentedButtonDefaults.itemShape(2, 3), modifier = Modifier.heightIn(min = 56.dp).testTag("init_master_mode")) { Text("Master INS", fontSize = 14.sp) }
         }
         if (!manual) {
             TextButton(onClick = { alignmentDetails = !alignmentDetails }, modifier = Modifier.heightIn(min = 48.dp)) {
@@ -1087,7 +1089,7 @@ private fun InitializationSectionContent(state: InsUiState, sendAction: (String,
                 onClick = { sendAction(NavigationService.ACTION_INITIALIZE_AUTO, emptyMap()) },
                 enabled = state.serviceRunning,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("initialize_auto"),
-            ) { Text("Begin automatic initialization", fontSize = 14.sp) }
+            ) { Text("Begin automatic alignment", fontSize = 14.sp) }
             if (state.initializationInProgress) {
                 Card(Modifier.fillMaxWidth().testTag("init_screen_progress")) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1120,7 +1122,10 @@ private fun InitializationSectionContent(state: InsUiState, sendAction: (String,
                 },
                 enabled = state.serviceRunning && valid,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("initialize_manual"),
-            ) { Text("Apply manual initialization", fontSize = 14.sp) }
+            ) { Text("Apply manual alignment", fontSize = 14.sp) }
+        }
+        if (alignmentMode == 2) {
+            MasterAlignmentContent(state, sendAction)
         }
         state.initializationError?.let {
             Text(it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp,
@@ -1129,6 +1134,49 @@ private fun InitializationSectionContent(state: InsUiState, sendAction: (String,
         OutlinedButton(onClick = { sendAction(NavigationService.ACTION_RESET, emptyMap()) }, enabled = state.serviceRunning, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("reset_filter")) {
             Text("Reset filter", fontSize = 14.sp)
         }
+    }
+}
+
+@Composable
+private fun MasterAlignmentContent(state: InsUiState, sendAction: (String, Map<String, Any>) -> Unit) {
+    var leverX by rememberSaveable { mutableStateOf("0.0") }
+    var leverY by rememberSaveable { mutableStateOf("0.0") }
+    var leverZ by rememberSaveable { mutableStateOf("0.0") }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Master INS transfer alignment", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text("The slave initializes from the master INS pose; master velocity and attitude are measurements. Align by driving straight, turning at least 20 degrees, then straight again. Position follows the master until the alignment is ready; GNSS resumes afterwards.", fontSize = 12.sp)
+        AdaptiveKeyValueRow("Master link", state.masterMessage ?: "Server listening on port ${state.masterServerPort ?: 29501}")
+        AdaptiveKeyValueRow("Master rate", if (state.masterConnected) "%.1f Hz".format(state.masterRateHz) else "Not connected")
+        AdaptiveKeyValueRow("Alignment status", state.solution.alignmentMessage)
+        if (state.solution.alignmentPhase == AlignmentPhase.READY) {
+            AdaptiveKeyValueRow(
+                "Mounting estimate",
+                "roll %.1f / pitch %.1f / yaw %.1f deg".format(
+                    state.solution.mountingEulerDeg.x, state.solution.mountingEulerDeg.y, state.solution.mountingEulerDeg.z),
+            )
+        }
+        Text("Master-to-phone lever arm (FRD, metres)", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(value = leverX, onValueChange = { leverX = it }, label = { Text("Fwd", fontSize = 12.sp) }, singleLine = true, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("lever_x"))
+            OutlinedTextField(value = leverY, onValueChange = { leverY = it }, label = { Text("Right", fontSize = 12.sp) }, singleLine = true, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("lever_y"))
+            OutlinedTextField(value = leverZ, onValueChange = { leverZ = it }, label = { Text("Down", fontSize = 12.sp) }, singleLine = true, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("lever_z"))
+        }
+        Button(
+            onClick = {
+                sendAction(NavigationService.ACTION_ALIGN_MASTER_START, mapOf(
+                    "leverX" to (leverX.toDoubleOrNull() ?: 0.0),
+                    "leverY" to (leverY.toDoubleOrNull() ?: 0.0),
+                    "leverZ" to (leverZ.toDoubleOrNull() ?: 0.0),
+                ))
+            },
+            enabled = state.serviceRunning,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("initialize_master"),
+        ) { Text("Begin master alignment", fontSize = 14.sp) }
+        OutlinedButton(
+            onClick = { sendAction(NavigationService.ACTION_ALIGN_MASTER_STOP, emptyMap()) },
+            enabled = state.serviceRunning,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("cancel_master"),
+        ) { Text("Cancel master alignment", fontSize = 14.sp) }
     }
 }
 

@@ -1166,7 +1166,7 @@ class NavigationService : Service() {
     }
 }
 
-private data class CsvReplayFeedState(
+internal data class CsvReplayFeedState(
     var lastImuNanos: Long = Long.MIN_VALUE,
     var lastGnssNanos: Long = Long.MIN_VALUE,
     var initialized: Boolean = false,

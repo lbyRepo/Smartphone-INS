@@ -50,7 +50,7 @@ class NavigationEngineTest {
     }
 
     @Test
-    fun magnetometerInitializesYawButMovingHeadingComesFromGnssCourse() {
+    fun gnssCourseDoesNotAssumePhoneBodyXIsVehicleForward() {
         val engine = NavigationEngine(MotionProfile.VEHICLE)
         val initialFix = GnssFix(
             1_000_000_000, 1_700_000_000_000, 1.3521, 103.8198, 25.0,
@@ -79,9 +79,9 @@ class NavigationEngineTest {
             )
         }
         val moving = engine.snapshot(4_010_000_000L, initialFix.unixMillis + 3_010)
-        assertTrue(moving.qualityFlags and QualityFlag.HEADING_COURSE_AIDED != 0)
-        assertTrue(moving.eulerDeg.z > 20.0, "GNSS course did not rotate heading toward East: ${moving.eulerDeg.z}")
-        assertTrue(moving.eulerDeg.z < 90.0)
+        assertEquals(0, moving.qualityFlags and QualityFlag.HEADING_COURSE_AIDED)
+        assertTrue(angularDifferenceDeg(moving.eulerDeg.z, initialized.eulerDeg.z) < 1.0,
+            "GNSS course must not be blended into phone yaw for an unknown mounting: ${moving.eulerDeg.z}")
     }
 
     @Test
@@ -292,7 +292,7 @@ class NavigationEngineTest {
         }
         val moving = engine.snapshot(start + 7_010_000_000L, 1_700_000_007_010L)
         assertTrue(moving.qualityFlags and QualityFlag.STATIONARY_CONSTRAINT == 0)
-        assertTrue(moving.qualityFlags and QualityFlag.HEADING_COURSE_AIDED != 0)
+        assertEquals(0, moving.qualityFlags and QualityFlag.HEADING_COURSE_AIDED)
         assertTrue(angularDifferenceDeg(moving.eulerDeg.z, held.eulerDeg.z) > 10.0, "Stationary attitude latch did not release")
     }
 

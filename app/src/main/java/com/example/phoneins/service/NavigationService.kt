@@ -217,6 +217,7 @@ class NavigationService : Service() {
                     }
                 } else {
                     forcedGnssOutage = enabled
+                    engine.setGnssAidingEnabled(!enabled)
                     InsRepository.update {
                         it.copy(
                             forcedGnssOutage = enabled,
@@ -326,7 +327,8 @@ class NavigationService : Service() {
 
     private fun acceptGnss(fix: GnssFix) {
         latestGnss = fix
-        if (forcedGnssOutage) engine.observeGnssWithoutAiding(fix) else engine.processGnss(fix)
+        engine.setGnssAidingEnabled(!forcedGnssOutage)
+        engine.processGnss(fix)
         tryAutomaticInitialization()
     }
 
@@ -1008,7 +1010,8 @@ class NavigationService : Service() {
             feed.latestImu = sample
         }
         fun applyGnss(fix: GnssFix) {
-            if (aidingEnabled) targetEngine.processGnss(fix) else targetEngine.observeGnssWithoutAiding(fix)
+            targetEngine.setGnssAidingEnabled(aidingEnabled)
+            targetEngine.processGnss(fix)
             feed.lastGnssNanos = fix.monotonicNanos
             feed.latestGnss = fix
         }
@@ -1061,7 +1064,7 @@ class NavigationService : Service() {
                     },
                 )
             }.onSuccess {
-                if (forcedGnssOutage) latestGnss?.let(engine::processGnss)
+                engine.setGnssAidingEnabled(true)
                 forcedGnssOutage = false
                 InsRepository.update {
                     it.copy(
@@ -1135,8 +1138,8 @@ class NavigationService : Service() {
         solution.degraded -> "Dead reckoning · GNSS stale"
         solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> "GNSS fix present · correction rejected"
         solution.qualityFlags and QualityFlag.STATIONARY_CONSTRAINT != 0 -> "GNSS valid · stationary hold"
-        solution.qualityFlags and QualityFlag.HEADING_COURSE_AIDED != 0 -> "GNSS valid · course-aided heading"
-        solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0 -> "GNSS valid · position aided · heading coasting"
+        solution.qualityFlags and QualityFlag.HEADING_COURSE_AIDED != 0 -> "GNSS valid · legacy course aid"
+        solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0 -> "GNSS valid · coupled position/velocity aiding"
         else -> "GNSS fix present · awaiting correction"
     }
 

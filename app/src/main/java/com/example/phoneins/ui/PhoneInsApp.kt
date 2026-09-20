@@ -400,8 +400,8 @@ private fun navigationStatusText(state: InsUiState): String {
         solution.degraded -> "Dead reckoning · GNSS stale"
         solution.qualityFlags and QualityFlag.GNSS_UPDATE_REJECTED != 0 -> "GNSS fix present · aiding rejected"
         solution.qualityFlags and QualityFlag.STATIONARY_CONSTRAINT != 0 -> "GNSS-aided · stationary hold"
-        solution.qualityFlags and QualityFlag.HEADING_COURSE_AIDED != 0 -> "Heading aided by GNSS"
-        solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0 -> "GNSS-aided · heading coasting"
+        solution.qualityFlags and QualityFlag.HEADING_COURSE_AIDED != 0 -> "Legacy course aid active"
+        solution.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0 -> "GNSS-aided · coupled correction"
         else -> "GNSS fix present · awaiting correction"
     }
 }

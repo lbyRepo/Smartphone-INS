@@ -18,7 +18,7 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 - WGS84 position, NED velocity, Euler attitude, bias, uncertainty, timing, and quality-state display.
 - Position map with a street-map basemap (cached online raster tiles, © OpenStreetMap contributors) or a plain grid, INS/GNSS trails, heading arrow, and scale bar.
 - Transfer alignment (master INS): in Setup, the Master INS mode initializes the slave from a master INS over the MST1 TCP protocol (port 29501), drives position from the master, and velocity-matches master velocity/attitude to estimate the mounting angle. Promotion to ready is covariance-driven, not time-boxed; GNSS resumes only once ready.
-- Optional causal 10-sample IMU smoothing window for mechanization (`NavigationEngine.IMU_SMOOTHING_WINDOW_SAMPLES`); quality and stillness monitoring stay on raw samples. A/B outage verification showed neutral-to-slightly-worse drift, so treat this as a tuning knob, not a fix.
+- Optional causal IMU smoothing window for mechanization (`NavigationEngine.IMU_SMOOTHING_WINDOW_SAMPLES`, default `1` = disabled). Quality and stillness monitoring always use raw samples. A/B outage verification showed neutral-to-slightly-worse drift, so it is retained only as a diagnostic knob, not as a drift fix.
 - Automatic initialization with a 15-second stationary window using gravity for coarse roll/pitch alignment.
 - Manual initialization with user-entered WGS84 coordinates and Euler angles.
 - Heading strategy that avoids continuous magnetometer dependence:
@@ -33,7 +33,32 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 
 ## Project status
 
-Current app version: `0.3.18`.
+Current app version: `0.3.19`.
+
+Version 0.3.19 repairs coupled estimation in the 15-state ECEF error-state filter. Previously,
+bias learning was an on/off switch: while the IMU quality monitor withheld learning (rough road,
+vibration, clipped or aliased samples, recovery), the attitude/bias correction channel was
+suppressed with it, so the filter could stop observing its own mounting and then integrate a
+mounting error as motion. Learning is now an explicit gain policy. The strict IMU-quality gate
+gives full gains; physically plausible rough motion inside a 180 s settling window after
+initialization gets capped adaptation (accelerometer bias at `0.4` gain and only in quasi-steady
+motion, gyro bias at full gain); anything else holds the bias gains exactly while position,
+velocity and attitude observations stay coupled in Joseph form under the existing 99.9 % NIS
+gates. At standstill the gravity observation corrects attitude only, because tilt and
+accelerometer bias are not separable there. No process-noise amplitude, gate, threshold or outage
+length was changed, and no covariance was made artificially more certain.
+
+Outage acceptance for this version: **three of the four mandated 45 s windows pass, one fails** —
+the failing synthetic window is reported rather than relaxed. Pre-repair figures below come from
+the archived reports in `docs/` (same trials and forced outages, anchors as recorded there).
+Bicycle anchor 110.248 s: 95.04 m /
+24.5°, 0 violations (before: 1656.26 m / 179.2°). Van anchor 600 s (near-vertical mount): 65.86 m
+/ 11.1°, 0 violations (before: 755.11 m). Van anchor 900 s: 72.28 m / 13.9°, 0 violations (before:
+1025.54 m / 87.7°). Synthetic `DecimeterRouteScenario` 100–145 s: 242.76 m / 37.96°, 4 of 42
+violations (before: 567.65 m / 176.9°, 35 violations) — the residual is a ~0.2 m/s² along-track
+error that the route's closing stop exposes, because outage isolation clears the stationary latches
+by design. Full evidence, plots and diagnosis:
+[filter repair verification](outputs/filter-repair-v0.3.19/VERIFICATION.md).
 
 Street-map zoom controls now use small transparent icons in the grey footer below
 the map while retaining 48 dp touch targets. OpenStreetMap attribution remains on

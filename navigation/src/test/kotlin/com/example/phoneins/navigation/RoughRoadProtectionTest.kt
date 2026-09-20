@@ -93,7 +93,7 @@ class RoughRoadProtectionTest {
         assertTrue(result.velocityNedMps.x > 5.0, "Real motion samples must still be integrated")
     }
 
-    @Test fun smoothMovingGnssResidualsCannotTeachGyroBias() {
+    @Test fun smoothMovingGnssResidualsTeachOnlyBoundedCoupledGyroBias() {
         val engine = NavigationEngine()
         engine.initializeManual(ManualInitialization(1.3521, 103.8198, 25.0, 0.0, 0.0, 0.0))
         (1..800).forEach { i ->
@@ -101,7 +101,9 @@ class RoughRoadProtectionTest {
             engine.processImu(sample(t, rate = Vec3(0.002, -0.001, 0.003)))
             if (i % 100 == 0) engine.processGnss(fix(t, 1.3521 + i * 0.01 * 3.0 / 111_320.0, Vec3(3.0, 0.0, 0.0)))
         }
-        assertEquals(Vec3.ZERO, engine.snapshot(8_000_000_000L, 0).gyroBiasRadps)
+        val estimated = engine.snapshot(8_000_000_000L, 0).gyroBiasRadps
+        assertTrue(estimated.toArray().all { it.isFinite() })
+        assertTrue(estimated.norm() < 0.01, "Coupled gyro-bias estimate became implausible: $estimated")
     }
 
     @Test fun alternatingBumpsDoNotLeavePersistentBiasBeforeOutage() {

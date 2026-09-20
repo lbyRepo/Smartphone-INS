@@ -6,6 +6,7 @@ local.properties
 captures/
 app/release/
 outputs/
+trial_data/
 work/
 .DS_Store
 __pycache__/

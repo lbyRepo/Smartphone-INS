@@ -27,6 +27,45 @@
 Run this verification whenever changes affect sensor processing, initialization, navigation,
 GNSS aiding, or replay. Use logged or playback sensor data and the current navigation algorithm.
 
+### Source data
+
+The operator's real phone trials are stored in `trial_data/`. Prefer them over synthetic data for
+this verification, and quote the SHA-256 alongside a result so it can be tied to exact bytes.
+They are gitignored on purpose: they hold real location traces and are far larger than Git
+hosting limits, so never commit them.
+
+| Log | Recorded trial | Rows | SHA-256 |
+|---|---|---:|---|
+| `trial_data/van/phoneins_trial_20260728_134941.csv` | 2026-07-28, 1462.6 s, VEHICLE, near-vertical phone mount | 146,260 | `39387bf4b3c01f2bfec68d225ec6d5feed4635c4d767bb8a83c2888c37a98056` |
+| `trial_data/bike/phoneins_trial_20260823_142934_501.csv` | 2026-08-23, 620.0 s, recorded VEHICLE profile | 62,005 | `3f78cd064b34fc5ba0e16f757fdb3019453c35ad264086fe6334b4819d05a51a` |
+
+- Established anchors: **600.000 s** and **900.000 s** in the 2026-07-28 van log (moving, full
+  GNSS reference, stable mount); the 2026-08-23 log contains two recorded forced outages at
+  157.10 s (39 s) and 495.10 s (68 s) to anchor inside.
+- Hosted history and previous numbers: `docs/outage-verification-trial-20260728.md`,
+  `docs/outage-verification-trial-20260823.md`, and the current-engine record
+  `docs/filter-repair-verification-v0.3.19.md`.
+- The 2026-09-20 bicycle trial used for the passing bicycle window
+  (`docs/outage-verification-trial-20260920.md`) is **not** in this checkout; ask the operator
+  for it before re-running that window.
+- Treat these files as read-only evidence: never edit, trim or regenerate them, and never let
+  their recorded INS columns stand in for a recomputed solution.
+- If `trial_data/` is missing, the verification cannot be completed — report that instead of
+  substituting another source, and the deterministic `SyntheticOutageAcceptanceTest` fixture
+  counts only as a supplement, never as a replacement.
+
+Run an anchor like this, recording the source file and interval before evaluating results:
+
+```bash
+TRIAL_CSV="$PWD/trial_data/van/phoneins_trial_20260728_134941.csv" TRIAL_OUTAGE_ANCHOR_S=600.000 \
+  ./gradlew :app:cleanTestDebugUnitTest :app:testDebugUnitTest --tests "*TrialOutageVerificationTest*"
+```
+
+- `cleanTestDebugUnitTest` is required between runs: the environment variables are not Gradle
+  task inputs, so a plain re-run is skipped as up-to-date.
+- The harness fails the build on a violated limit and writes
+  `app/build/reports/trial-outage/<log>-<anchor>/verification_summary.txt` plus its per-epoch CSV.
+
 ### Procedure
 
 - Reprocess raw IMU and GNSS measurements. Recorded INS outputs must not substitute for

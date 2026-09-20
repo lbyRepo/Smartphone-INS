@@ -9,6 +9,7 @@ import com.example.phoneins.navigation.TimedImuSample
 import com.example.phoneins.navigation.Vec3
 import org.junit.Assume.assumeTrue
 import org.junit.Test
+import org.junit.Assert.assertTrue
 import java.io.File
 import java.io.PrintWriter
 import kotlin.math.abs
@@ -87,8 +88,11 @@ class TrialOutageVerificationTest {
         val reacquisitionSeparations = ArrayList<Double>()
         var reacquisitionApplied = false
 
-        val epochsFile = File(sourceFile.parent, "verification_epochs.csv")
-        val summaryFile = File(sourceFile.parent, "verification_summary.txt")
+        val reportDirectory = File("build/reports/trial-outage/${sourceFile.nameWithoutExtension}-${"%.3f".format((outageStartNanos - firstNanos) / 1e9)}")
+            .apply { mkdirs() }
+        val epochsFile = File(reportDirectory, "verification_epochs.csv")
+        val summaryFile = File(reportDirectory, "verification_summary.txt")
+        var previousAidingEnabled: Boolean? = null
 
         epochsFile.printWriter().use { out ->
             out.println("t_s,ins_lat,ins_lon,ins_alt,ins_vn,ins_ve,ins_vd,ins_speed,roll_deg,pitch_deg,yaw_deg,gns_lat,gns_lon,gns_vn,gns_ve,gns_speed,aiding,separation_m,direction_err_deg,abx,aby,abz,gbx,gby,gbz,flags")
@@ -96,6 +100,10 @@ class TrialOutageVerificationTest {
                 val t = (row.monotonicNanos - firstNanos) / 1e9
                 val inOutage = row.monotonicNanos in outageStartNanos until outageEndNanos
                 val aidingEnabled = !inOutage
+                if (previousAidingEnabled != aidingEnabled) {
+                    engine.setGnssAidingEnabled(aidingEnabled)
+                    previousAidingEnabled = aidingEnabled
+                }
 
                 // Mirror NavigationService.processCsvReplayRow exactly.
                 var imu = row.takeIf {
@@ -160,7 +168,7 @@ class TrialOutageVerificationTest {
                     feed.latestImu = sample
                 }
                 fun applyGnss(fix: GnssFix) {
-                    if (aidingEnabled) engine.processGnss(fix) else engine.observeGnssWithoutAiding(fix)
+                    engine.processGnss(fix)
                     feed.lastGnssNanos = fix.monotonicNanos
                     feed.latestGnss = fix
                 }
@@ -184,7 +192,7 @@ class TrialOutageVerificationTest {
                     separation = hypot(insEnu[0] - gnssEnu[0], insEnu[1] - gnssEnu[1])
                     gnssSpeed = hypot(gnss.velocityNedMps.x, gnss.velocityNedMps.y)
                     val insSpeed = hypot(solution.velocityNedMps.x, solution.velocityNedMps.y)
-                    if (gnssSpeed >= 1.0) {
+                    if (inOutage && gnssSpeed >= 1.0) {
                         directionSamples++
                         if (insSpeed < 1e-6) {
                             zeroVelocityViolations++
@@ -250,8 +258,21 @@ class TrialOutageVerificationTest {
                 appendLine("reacquisition_max_separation_first_10s=%.2f".format(reacquisitionSeparations.maxOrNull() ?: Double.NaN))
                 appendLine("separation_limit_m=150")
                 appendLine("direction_limit_deg=30")
+                val completeCoverage = outageEpochs > 0 && endpointSeparation.isFinite() &&
+                    rows.last().monotonicNanos >= outageEndNanos
+                val passed = completeCoverage && maxSeparation <= 150.0 && directionSamples > 0 &&
+                    directionViolations == 0 && zeroVelocityViolations == 0 && reacquisitionApplied
+                appendLine("complete_reference_coverage=$completeCoverage")
+                appendLine("verdict=${if (passed) "PASS" else if (!completeCoverage || directionSamples == 0) "INCONCLUSIVE" else "FAIL"}")
             },
         )
+        assertTrue("Incomplete 45-second reference coverage; see ${summaryFile.absolutePath}",
+            outageEpochs > 0 && endpointSeparation.isFinite() && rows.last().monotonicNanos >= outageEndNanos)
+        assertTrue("No moving GNSS reference epochs within outage; see ${summaryFile.absolutePath}", directionSamples > 0)
+        assertTrue("Maximum horizontal separation $maxSeparation m exceeds 150 m; see ${summaryFile.absolutePath}", maxSeparation <= 150.0)
+        assertTrue("Direction violations=$directionViolations, max=$maxDirectionError deg; see ${summaryFile.absolutePath}",
+            directionViolations == 0 && zeroVelocityViolations == 0)
+        assertTrue("GNSS correction did not resume after outage; see ${summaryFile.absolutePath}", reacquisitionApplied)
     }
 
     /** WGS84 geodetic coordinates to Earth-Centered-Earth-Fixed metres. */

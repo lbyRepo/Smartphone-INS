@@ -33,6 +33,16 @@ class NavigationEngine(
     private val imuQuality = ImuQualityMonitor()
     private val accelSmoothingWindow = ArrayDeque<Vec3>()
     private val gyroSmoothingWindow = ArrayDeque<Vec3>()
+    private var alignmentPhase = AlignmentPhase.NONE
+    private var alignmentLeverArmFrdM = Vec3.ZERO
+    private var alignmentStartNanos = Long.MIN_VALUE
+    private var masterVelocityAccepted = 0
+    private var masterVelocityTotal = 0
+    private var lastMasterBodyToNed: Quaternion? = null
+    private var mountingEulerDeg = Vec3.ZERO
+    private var mountingStdDeg = Vec3(Double.NaN, Double.NaN, Double.NaN)
+    private val transferEstimator = TransferAlignmentEstimator()
+    private var lastTransferStatus = TransferAlignmentStatus()
     private var imuStationary = false
     private var imuClearlyMoving = false
     private var gnssStationaryUntilNanos = Long.MIN_VALUE
@@ -75,6 +85,14 @@ class NavigationEngine(
         imuQuality.reset()
         accelSmoothingWindow.clear()
         gyroSmoothingWindow.clear()
+        alignmentPhase = AlignmentPhase.NONE
+        alignmentStartNanos = Long.MIN_VALUE
+        masterVelocityAccepted = 0
+        masterVelocityTotal = 0
+        lastMasterBodyToNed = null
+        mountingEulerDeg = Vec3.ZERO
+        mountingStdDeg = Vec3(Double.NaN, Double.NaN, Double.NaN)
+        transferEstimator.reset()
         imuStationary = false
         imuClearlyMoving = false
         gnssStationaryUntilNanos = Long.MIN_VALUE
@@ -212,6 +230,99 @@ class NavigationEngine(
         resetCovariance()
     }
 
+    /**
+     * Starts master-INS transfer alignment. The slave is initialized from the first master
+     * reference; position is master-driven, the shadow estimator matches slave velocity
+     * against the master to estimate the stiff (mounting) angle, and the filter is promoted
+     * to [AlignmentPhase.READY] once its covariance converges. GNSS is ignored until then.
+     */
+    @Synchronized
+    fun beginTransferAlignment(leverArmFrdM: Vec3 = Vec3.ZERO) {
+        require(initSource == InitSource.NONE) { "Reset the filter before starting master alignment" }
+        alignmentLeverArmFrdM = leverArmFrdM
+        alignmentPhase = AlignmentPhase.ALIGNING
+        alignmentStartNanos = Long.MIN_VALUE
+        masterVelocityAccepted = 0
+        masterVelocityTotal = 0
+        lastMasterBodyToNed = null
+        mountingEulerDeg = Vec3.ZERO
+        mountingStdDeg = Vec3(Double.NaN, Double.NaN, Double.NaN)
+        transferEstimator.reset()
+    }
+
+    @Synchronized
+    fun processMasterReference(reference: MasterInsReference) {
+        if (alignmentPhase != AlignmentPhase.ALIGNING) return
+        if (!reference.requiredFieldsValid) return
+        if (!reference.velocityNedMps.toArray().all { it.isFinite() } ||
+            !reference.latitudeDeg.isFinite() || !reference.longitudeDeg.isFinite()) return
+        val masterBodyToNed = reference.bodyToNed.normalized()
+        val masterPosition = geodeticToEcef(reference.latitudeDeg, reference.longitudeDeg, reference.altitudeM)
+
+        if (initSource == InitSource.NONE) {
+            // First reference initializes the slave entirely from the master pose. The
+            // mounting yaw is unknown, so its prior is wide; roll/pitch mirror the master's
+            // own attitude quality (a pessimistic roll/pitch prior would let gravity couple
+            // into velocity uncertainty at 9.8 m/s^2 per radian and block convergence).
+            val geo = ecefToGeodetic(masterPosition)
+            val nedToEcef = transpose3(ecefToNedMatrix(geo.latitudeRad, geo.longitudeRad))
+            positionEcef = masterPosition
+            velocityEcef = multiply3(nedToEcef, reference.velocityNedMps)
+            bodyToEcef = Quaternion.fromMatrix(multiply3(nedToEcef, masterBodyToNed.toMatrix())).normalized()
+            accelerometerBias = Vec3.ZERO
+            gyroBias = Vec3.ZERO
+            initSource = InitSource.TRANSFER
+            initializedWithMagnetometer = false
+            movementLatched = false
+            stationaryAnchorEcef = null
+            stationaryAnchorSamples = 0
+            resetCovariance()
+            resetStateBlockCovariance(POSITION, doubleArrayOf(2.0, 2.0, 3.0))
+            resetStateBlockCovariance(VELOCITY, doubleArrayOf(0.5, 0.5, 0.5))
+            resetStateBlockCovariance(ATTITUDE, doubleArrayOf(
+                Math.toRadians(reference.attitudeStdDeg.x.coerceIn(0.5, 30.0)),
+                Math.toRadians(reference.attitudeStdDeg.y.coerceIn(0.5, 30.0)),
+                Math.toRadians(ALIGNMENT_MASTER_YAW_PRIOR_DEG)))
+            resetStateBlockCovariance(ACCEL_BIAS, doubleArrayOf(0.4, 0.4, 0.4))
+            resetStateBlockCovariance(GYRO_BIAS, doubleArrayOf(0.03, 0.03, 0.03))
+            alignmentStartNanos = reference.phoneMonotonicNanos
+            lastMasterBodyToNed = masterBodyToNed
+            return
+        }
+
+        // Slave position is master-owned during alignment: hard-set and keep its uncertainty
+        // at master grade. Velocity remains the slave's own dead-reckoned solution — the
+        // shadow estimator matches it against the master to estimate the stiff angle.
+        positionEcef = masterPosition
+        resetStateBlockCovariance(POSITION, doubleArrayOf(2.0, 2.0, 3.0))
+
+        val phone = buildSolution(reference.phoneMonotonicNanos, reference.masterUtcNanos / 1_000_000L)
+        val status = transferEstimator.update(reference, phone)
+        lastTransferStatus = status
+        mountingEulerDeg = status.mountingEulerDeg
+        if (status.phase == TransferAlignmentPhase.CONVERGED) {
+            transferEstimator.result(reference, phone)?.let(::applyTransferAlignment)
+            alignmentPhase = AlignmentPhase.READY
+        }
+    }
+
+    /** Applies the converged transfer-alignment correction to the main filter state. */
+    @Synchronized
+    fun applyTransferAlignment(result: TransferAlignmentResult) {
+        if (initSource == InitSource.NONE) return
+        val geo = ecefToGeodetic(positionEcef)
+        val nedToEcef = transpose3(ecefToNedMatrix(geo.latitudeRad, geo.longitudeRad))
+        val correctionEcef = multiply3(nedToEcef, result.attitudeCorrectionNedRad)
+        bodyToEcef = (Quaternion.fromRotationVector(correctionEcef) * bodyToEcef).normalized()
+        accelerometerBias += result.accelerometerBiasCorrectionMps2
+        gyroBias += result.gyroBiasCorrectionRadps
+        resetStateBlockCovariance(ATTITUDE, result.attitudeStdDeg.toArray().map { Math.toRadians(it) }.toDoubleArray())
+        resetStateBlockCovariance(ACCEL_BIAS, result.accelerometerBiasStdMps2.toArray())
+        resetStateBlockCovariance(GYRO_BIAS, result.gyroBiasStdRadps.toArray())
+        mountingEulerDeg = result.mountingEulerDeg
+        mountingStdDeg = result.attitudeStdDeg
+    }
+
     @Synchronized
     fun processImu(sample: TimedImuSample) {
         val previous = lastImu
@@ -249,6 +360,9 @@ class NavigationEngine(
 
     @Synchronized
     fun processGnss(fix: GnssFix) {
+        // During master transfer alignment the slave is master-aided; GNSS is only accepted
+        // once the alignment has been promoted to READY.
+        if (alignmentPhase == AlignmentPhase.ALIGNING) return
         if (!validFix(fix)) return
         val resumingSuspendedAiding = gnssAidingSuspended
         gnssAidingSuspended = false
@@ -369,6 +483,12 @@ class NavigationEngine(
 
     @Synchronized
     fun snapshot(monotonicNanos: Long, unixMillis: Long): NavigationSolution {
+        val solution = buildSolution(monotonicNanos, unixMillis)
+        outputSequence++
+        return solution
+    }
+
+    private fun buildSolution(monotonicNanos: Long, unixMillis: Long): NavigationSolution {
         if (initSource == InitSource.NONE) {
             return NavigationSolution.empty(monotonicNanos, unixMillis).copy(
                 latestImu = lastImu,
@@ -421,6 +541,11 @@ class NavigationEngine(
             covariance, STATE_SIZE, ATTITUDE,
             multiply3(nedRotationToEulerJacobian(Math.toRadians(euler.y), Math.toRadians(euler.z)), ecefToNed),
         ) * (180.0 / Math.PI)
+        val alignmentMessage = when (alignmentPhase) {
+            AlignmentPhase.READY -> "Aligned · ready (mounting yaw %.1f deg)".format(mountingEulerDeg.z)
+            AlignmentPhase.ALIGNING -> lastTransferStatus.message.ifEmpty { "Waiting for master INS" }
+            AlignmentPhase.NONE -> ""
+        }
         return NavigationSolution(
             monotonicNanos = monotonicNanos,
             unixMillis = unixMillis,
@@ -438,9 +563,13 @@ class NavigationEngine(
             motionProfile = profile,
             fixStatus = fixStatus,
             qualityFlags = flags,
-            sequence = outputSequence++,
+            sequence = outputSequence,
             accelerometerBiasMps2 = accelerometerBias,
             gyroBiasRadps = gyroBias,
+            alignmentPhase = alignmentPhase,
+            alignmentMessage = alignmentMessage,
+            mountingEulerDeg = mountingEulerDeg,
+            mountingStdDeg = mountingStdDeg,
         )
     }
 
@@ -937,6 +1066,13 @@ class NavigationEngine(
 
         /** Default causal IMU smoothing window for mechanization (samples). */
         const val IMU_SMOOTHING_WINDOW_SAMPLES = 10
+
+        /** Transfer-alignment promotion thresholds and priors. */
+        const val ALIGNMENT_READY_ATTITUDE_STD_DEG = 3.0
+        const val ALIGNMENT_READY_VELOCITY_STD_MPS = 0.35
+        const val ALIGNMENT_MASTER_YAW_PRIOR_DEG = 30.0
+        private val ALIGNMENT_MIN_DURATION_NANOS = 10L * 1_000_000_000L
+        private const val ALIGNMENT_MIN_ACCEPTED_UPDATES = 50
         private const val STATE_SIZE = 15
         private const val POSITION = 0
         private const val VELOCITY = 3

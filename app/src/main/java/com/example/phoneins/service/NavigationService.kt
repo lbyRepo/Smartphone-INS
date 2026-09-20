@@ -35,6 +35,7 @@ class NavigationService : Service() {
     private lateinit var recorder: SessionRecorder
     private lateinit var csvLogger: CsvTrialLogger
     private lateinit var trialLogCatalog: TrialLogCatalog
+    private lateinit var masterServer: MasterReferenceServer
     private var replayCsvLogger: CsvTrialLogger? = null
     private var acquisition: AndroidAcquisition? = null
     private var simulator: DeterministicSimulator? = null
@@ -76,6 +77,15 @@ class NavigationService : Service() {
             .apply { setReferenceCounted(false); acquire(12 * 60 * 60 * 1000L) }
         tcp = TcpInsServer()
         aoa = AoaFrameTransport(this)
+        masterServer = MasterReferenceServer(
+            onReference = { reference, _ -> engine.processMasterReference(reference) },
+            onStatus = { status ->
+                InsRepository.update {
+                    it.copy(masterConnected = status.connected, masterRateHz = status.rateHz, masterMessage = status.message)
+                }
+            },
+        )
+        masterServer.start()
         recorder = SessionRecorder(this)
         csvLogger = CsvTrialLogger(this)
         trialLogCatalog = TrialLogCatalog(this)
@@ -134,6 +144,8 @@ class NavigationService : Service() {
                 tryAutomaticInitialization()
             }
             ACTION_INITIALIZE_MANUAL -> initializeManual(command)
+            ACTION_ALIGN_MASTER_START -> beginMasterAlignment(command)
+            ACTION_ALIGN_MASTER_STOP -> cancelMasterAlignment()
             ACTION_RESET -> {
                 forcedGnssOutage = false
                 engine.reset(InsRepository.state.value.solution.motionProfile)
@@ -251,6 +263,7 @@ class NavigationService : Service() {
         if (::csvLogger.isInitialized) csvLogger.stop()
         replayCsvLogger?.stop()
         tcp.close(); aoa.close()
+        masterServer.close()
         wakeLock?.let { if (it.isHeld) it.release() }
         forcedGnssOutage = false
         InsRepository.update {
@@ -493,6 +506,40 @@ class NavigationService : Service() {
         val message = error.message ?: fallback
         InsRepository.update {
             it.copy(initializationInProgress = false, initializationError = message, statusMessage = message)
+        }
+    }
+
+    private fun beginMasterAlignment(intent: Intent) {
+        autoRequestedNanos = null
+        val leverArm = Vec3(
+            intent.getDoubleExtra("leverX", 0.0),
+            intent.getDoubleExtra("leverY", 0.0),
+            intent.getDoubleExtra("leverZ", 0.0),
+        )
+        runCatching {
+            engine.reset(InsRepository.state.value.solution.motionProfile)
+            engine.beginTransferAlignment(leverArm)
+        }.onSuccess {
+            InsRepository.update {
+                it.copy(
+                    initializationError = null,
+                    initializationInProgress = false,
+                    trajectoryEpoch = it.trajectoryEpoch + 1,
+                    statusMessage = "Master alignment started · drive straight, then turn",
+                )
+            }
+        }.onFailure { error -> InsRepository.update { it.copy(initializationError = error.message ?: "Master alignment failed to start") } }
+    }
+
+    private fun cancelMasterAlignment() {
+        engine.reset(InsRepository.state.value.solution.motionProfile)
+        InsRepository.update {
+            it.copy(
+                initializationError = null,
+                initializationInProgress = false,
+                trajectoryEpoch = it.trajectoryEpoch + 1,
+                statusMessage = "Master alignment cancelled · reset the filter to begin again",
+            )
         }
     }
 
@@ -1117,6 +1164,8 @@ class NavigationService : Service() {
     companion object {
         const val ACTION_START = "com.example.phoneins.START"
         const val ACTION_STOP = "com.example.phoneins.STOP"
+        const val ACTION_ALIGN_MASTER_START = "com.example.phoneins.ALIGN_MASTER_START"
+        const val ACTION_ALIGN_MASTER_STOP = "com.example.phoneins.ALIGN_MASTER_STOP"
         const val ACTION_INITIALIZE_AUTO = "com.example.phoneins.INIT_AUTO"
         const val ACTION_INITIALIZE_MANUAL = "com.example.phoneins.INIT_MANUAL"
         const val ACTION_RESET = "com.example.phoneins.RESET"
@@ -1156,6 +1205,8 @@ class NavigationService : Service() {
             ACTION_SIMULATED_MOTION,
             ACTION_INITIALIZE_AUTO,
             ACTION_INITIALIZE_MANUAL,
+            ACTION_ALIGN_MASTER_START,
+            ACTION_ALIGN_MASTER_STOP,
             ACTION_RESET,
             ACTION_PROFILE,
             ACTION_SIMULATION,

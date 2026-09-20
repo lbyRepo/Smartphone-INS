@@ -39,6 +39,10 @@ data class InsUiState(
     val coarseRollDeg: Double = Double.NaN,
     val coarsePitchDeg: Double = Double.NaN,
     val recentTrialLogs: List<TrialLogSummary> = emptyList(),
+    val masterServerPort: Int? = null,
+    val masterConnected: Boolean = false,
+    val masterRateHz: Double = 0.0,
+    val masterMessage: String? = null,
     val csvReplay: CsvReplayUiState = CsvReplayUiState(),
     val trajectoryEpoch: Long = 0L,
 )

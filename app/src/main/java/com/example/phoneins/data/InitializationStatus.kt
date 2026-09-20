@@ -1,10 +1,10 @@
 package com.example.phoneins.data
 
 enum class InitializationStatus(val label: String, val icon: String) {
-    IDLE("Not initialized", "○"),
-    IN_PROGRESS("Initializing", "◷"),
-    COMPLETE("Initialized", "✓"),
-    FAILED("Initialization failed", "!"),
+    IDLE("Not aligned", "○"),
+    IN_PROGRESS("Aligning", "◷"),
+    COMPLETE("Aligned · ready", "✓"),
+    FAILED("Alignment failed", "!"),
 }
 
 val InsUiState.initializationStatus: InitializationStatus

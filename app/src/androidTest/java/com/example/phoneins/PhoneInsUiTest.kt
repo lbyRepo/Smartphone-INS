@@ -107,6 +107,17 @@ class PhoneInsUiTest {
         composeRule.onNodeWithText("Dropped log records").performScrollTo().assertIsDisplayed()
     }
 
+
+    @Test
+    fun masterAlignmentModeIsSelectableInSetup() {
+        composeRule.onNodeWithTag("nav_setup").performClick()
+        composeRule.onNodeWithTag("init_master_mode").performScrollTo().performClick()
+        composeRule.onNodeWithTag("initialize_master").performScrollTo().assertIsDisplayed()
+        // Master alignment needs the navigation service running; it is stopped in this test.
+        composeRule.onNodeWithTag("initialize_master").assertIsNotEnabled()
+        composeRule.onNodeWithTag("cancel_master").assertIsDisplayed()
+    }
+
     @Test
     fun setupRetainsEntriesAndExpandedSectionsAcrossTabSwitches() {
         composeRule.onNodeWithTag("nav_setup").performClick()
@@ -126,7 +137,7 @@ class PhoneInsUiTest {
     @Test
     fun initializationSectionReopensAfterAnInitializationError() {
         composeRule.onNodeWithTag("nav_setup").performClick()
-        composeRule.onNodeWithText("Initialization").performClick()
+        composeRule.onNodeWithText("Alignment").performClick()
         composeRule.onNodeWithContentDescription("Initialization section")
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Collapsed"))
         composeRule.onNodeWithTag("initialization_error").assertDoesNotExist()
@@ -175,7 +186,7 @@ class PhoneInsUiTest {
     fun dashboardShowsInitializationCompletionState() {
         composeRule.onNodeWithTag("initialization_status").assertIsDisplayed()
         composeRule.onNodeWithTag("initialization_status")
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Not initialized"))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Not aligned"))
         composeRule.onNodeWithText("Waiting for initialization").assertDoesNotExist()
 
         composeRule.runOnIdle {
@@ -191,7 +202,7 @@ class PhoneInsUiTest {
                 )
             }
         }
-        composeRule.onNodeWithText("Initializing").assertIsDisplayed()
+        composeRule.onNodeWithText("Aligning").assertIsDisplayed()
         composeRule.onNodeWithTag("initialization_progress_text").assertDoesNotExist()
         composeRule.onNodeWithTag("coarse_alignment").assertDoesNotExist()
         composeRule.onNodeWithTag("nav_setup").performClick()
@@ -211,16 +222,16 @@ class PhoneInsUiTest {
                 )
             }
         }
-        composeRule.onNodeWithText("Initialized").assertIsDisplayed()
+        composeRule.onNodeWithText("Aligned · ready").assertIsDisplayed()
         composeRule.onNodeWithTag("initialization_progress_text").assertDoesNotExist()
     }
 
     @Test
-    fun initializationFailureDetailsStayOnInitAndRetryClearsFailure() {
+    fun initializationFailureDetailsStayOnSetupAndRetryClearsFailure() {
         composeRule.runOnIdle {
             InsRepository.update { it.copy(initializationError = "Invalid alignment pose") }
         }
-        composeRule.onNodeWithText("Initialization failed").assertIsDisplayed()
+        composeRule.onNodeWithText("Alignment failed").assertIsDisplayed()
         composeRule.onNodeWithText("Invalid alignment pose").assertDoesNotExist()
         composeRule.onNodeWithText("Waiting for initialization").assertDoesNotExist()
         composeRule.onNodeWithTag("nav_setup").performClick()
@@ -229,7 +240,7 @@ class PhoneInsUiTest {
             InsRepository.update { it.copy(initializationError = null, initializationInProgress = true) }
         }
         composeRule.onNodeWithTag("nav_dashboard").performClick()
-        composeRule.onNodeWithText("Initializing").assertIsDisplayed()
+        composeRule.onNodeWithText("Aligning").assertIsDisplayed()
         composeRule.onNodeWithText("Initialization failed").assertDoesNotExist()
     }
 

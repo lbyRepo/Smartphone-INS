@@ -17,6 +17,7 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 - Raw accelerometer, gyroscope, magnetometer, and GNSS display.
 - WGS84 position, NED velocity, Euler attitude, bias, uncertainty, timing, and quality-state display.
 - Position map with a street-map basemap (cached online raster tiles, © OpenStreetMap contributors) or a plain grid, INS/GNSS trails, heading arrow, and scale bar.
+- Transfer alignment (master INS): in Setup, the Master INS mode initializes the slave from a master INS over the MST1 TCP protocol (port 29501), drives position from the master, and velocity-matches master velocity/attitude to estimate the mounting angle. Promotion to ready is covariance-driven, not time-boxed; GNSS resumes only once ready.
 - Optional causal 10-sample IMU smoothing window for mechanization (`NavigationEngine.IMU_SMOOTHING_WINDOW_SAMPLES`); quality and stillness monitoring stay on raw samples. A/B outage verification showed neutral-to-slightly-worse drift, so treat this as a tuning knob, not a fix.
 - Automatic initialization with a 15-second stationary window using gravity for coarse roll/pitch alignment.
 - Manual initialization with user-entered WGS84 coordinates and Euler angles.
@@ -32,7 +33,7 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 
 ## Project status
 
-Current app version: `0.3.17`.
+Current app version: `0.3.18`.
 
 Street-map zoom controls now use small transparent icons in the grey footer below
 the map while retaining 48 dp touch targets. OpenStreetMap attribution remains on

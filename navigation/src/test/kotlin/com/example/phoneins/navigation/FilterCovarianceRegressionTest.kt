@@ -14,6 +14,24 @@ import kotlin.test.assertTrue
  * coupling in mechanization.
  */
 class FilterCovarianceRegressionTest {
+    @Test fun ordinaryToggleRetainsReacquisitionUntilFixAndClearsAidedFlagsImmediately() {
+        val engine = NavigationEngine()
+        engine.initializeManual(ManualInitialization(1.3521, 103.8198, 25.0, 0.0, 0.0, 0.0))
+        engine.processGnss(fix(1_000_000_000L, 1.3521, 103.8198))
+        engine.setGnssAidingEnabled(false)
+        val off = engine.snapshot(1_010_000_000L, 0)
+        assertEquals(0, off.qualityFlags and QualityFlag.GNSS_POSITION_VALID)
+        engine.processGnss(fix(2_000_000_000L, 1.3521, 103.8198))
+        engine.setGnssAidingEnabled(true)
+        assertTrue(engine.snapshot(2_010_000_000L, 0).degraded)
+        val before = engine.snapshot(2_010_000_000L, 0)
+        engine.processGnss(fix(3_000_000_000L, 1.3521, 103.8198, Vec3(8.0, 1.0, 0.0)))
+        val after = engine.snapshot(3_000_000_000L, 0)
+        assertEquals(before.gyroBiasRadps, after.gyroBiasRadps)
+        assertEquals(before.accelerometerBiasMps2, after.accelerometerBiasMps2)
+        assertEquals(before.eulerDeg, after.eulerDeg)
+        assertTrue(after.qualityFlags and QualityFlag.GNSS_POSITION_VALID != 0)
+    }
 
     private val stateSize = 15
     private val position = 0

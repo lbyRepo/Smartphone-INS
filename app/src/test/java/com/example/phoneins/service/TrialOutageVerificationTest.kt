@@ -12,6 +12,7 @@ import org.junit.Test
 import org.junit.Assert.assertTrue
 import java.io.File
 import java.io.PrintWriter
+import java.security.MessageDigest
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -194,7 +195,7 @@ class TrialOutageVerificationTest {
                     val insSpeed = hypot(solution.velocityNedMps.x, solution.velocityNedMps.y)
                     if (inOutage && gnssSpeed >= 1.0) {
                         directionSamples++
-                        if (insSpeed < 1e-6) {
+                        if (!insSpeed.isFinite() || insSpeed < 1e-6) {
                             zeroVelocityViolations++
                             directionError = 180.0
                         } else {
@@ -243,6 +244,12 @@ class TrialOutageVerificationTest {
         summaryFile.writeText(
             buildString {
                 appendLine("source=${sourceFile.name}")
+                val digest = MessageDigest.getInstance("SHA-256")
+                sourceFile.inputStream().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) { val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }
+                }
+                appendLine("source_sha256=${digest.digest().joinToString("") { "%02x".format(it) }}")
                 appendLine("rows=${rows.size}")
                 appendLine("initialization=$initializationDescription")
                 appendLine("outage_start_t_s=%.3f".format((outageStartNanos - firstNanos) / 1e9))

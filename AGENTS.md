@@ -2,9 +2,14 @@
 
 ## Commits and versions
 
-- Use Conventional Commit messages, for example `fix(navigation): prevent invalid GNSS updates`.
-- Every commit that changes application, navigation, protocol, or tooling code must also
-  increment `versionCode` and update `versionName` in `app/build.gradle.kts`.
+- Never create, amend, merge, cherry-pick, or otherwise generate Git commits. Never push.
+- The agent may stage explicitly reviewed files and propose Conventional Commit titles and
+  descriptions. The user creates commits.
+- Every proposed commit-sized change set, including documentation-only changes, must increment
+  `versionCode` and update `versionName` in `app/build.gradle.kts` before staging.
+- Restaging the same proposed change set does not require another version increment.
+- Preserve unrelated working-tree and staged changes; stage named files or reviewed hunks.
+- Report test failures explicitly; staging does not imply verification passed.
 - Use a patch version increment for fixes unless the user requests a different version.
 - Keep the current app version in `README.md` consistent with the Gradle configuration.
 - Run relevant tests and assemble the debug APK after changing code or the app version.

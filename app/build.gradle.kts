@@ -15,8 +15,8 @@ android {
         applicationId = "com.example.phoneins"
         minSdk = 33
         targetSdk = 36
-        versionCode = 23
-        versionName = "0.3.19"
+        versionCode = 24
+        versionName = "0.3.20"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
@@ -56,6 +56,13 @@ android {
 
 kotlin {
     jvmToolchain(21)
+}
+
+tasks.withType<Test>().configureEach {
+    val trial = providers.environmentVariable("TRIAL_CSV")
+    if (trial.isPresent) inputs.file(trial.get()).withPropertyName("trialCsv")
+    inputs.property("trialOutageAnchor", providers.environmentVariable("TRIAL_OUTAGE_ANCHOR_S").orElse("recorded"))
+    inputs.property("trialSmoothing", providers.environmentVariable("TRIAL_SMOOTH").orElse("default"))
 }
 
 dependencies {

@@ -33,7 +33,7 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 
 ## Project status
 
-Current app version: `0.3.19`.
+Current app version: `0.3.20`.
 
 Version 0.3.19 repairs coupled estimation in the 15-state ECEF error-state filter. Previously,
 bias learning was an on/off switch: while the IMU quality monitor withheld learning (rough road,

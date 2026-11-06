@@ -11,6 +11,7 @@ import java.io.FileOutputStream
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.TimeUnit
 
 interface FrameTransport {
     val connected: Boolean
@@ -27,6 +28,9 @@ class AoaFrameTransport(private val context: Context) : FrameTransport {
     private val permissionRequested = AtomicBoolean(false)
     private val dropCounter = AtomicLong(0)
     private var descriptor: ParcelFileDescriptor? = null
+    private var worker: Thread? = null
+    @Volatile var error: String? = null
+        private set
     @Volatile private var stream: FileOutputStream? = null
     private val permissionIntent by lazy {
         PendingIntent.getBroadcast(
@@ -60,7 +64,8 @@ class AoaFrameTransport(private val context: Context) : FrameTransport {
             },
             Context.RECEIVER_NOT_EXPORTED,
         )
-        Thread({
+        worker = Thread({
+          try {
             while (running.get()) {
                 if (stream == null) {
                     val accessory = usbManager.accessoryList?.firstOrNull()
@@ -75,22 +80,32 @@ class AoaFrameTransport(private val context: Context) : FrameTransport {
                     }
                     if (stream == null) Thread.sleep(1_000)
                 } else {
-                    runCatching { stream?.write(queue.take()); stream?.flush() }.onFailure {
+                    val frame = queue.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                    runCatching { stream?.write(frame); stream?.flush() }.onFailure {
+                        error = "USB output failed: ${it.message}"
                         closeDescriptor()
                     }
                 }
             }
+          } catch (_: InterruptedException) {
+              // Shutdown wakes both the reconnect wait and the queue wait.
+          } catch (failure: Exception) {
+              error = "USB output failed: ${failure.message}"
+          } finally { closeDescriptor() }
         }, "ins-aoa-output").apply { isDaemon = true; start() }
     }
 
     override fun offer(frame: ByteArray) {
-        if (connected && !queue.offer(frame.copyOf())) dropCounter.incrementAndGet()
+        synchronized(queue) {
+            if (running.get() && connected && !queue.offer(frame.copyOf())) dropCounter.incrementAndGet()
+        }
     }
 
     override fun close() {
         running.set(false)
         closeDescriptor()
-        queue.clear()
+        worker?.interrupt()
+        worker?.join(1_000)
         runCatching { context.unregisterReceiver(usbReceiver) }
     }
 
@@ -100,6 +115,7 @@ class AoaFrameTransport(private val context: Context) : FrameTransport {
         runCatching { descriptor?.close() }
         stream = null
         descriptor = null
+        synchronized(queue) { dropCounter.addAndGet(queue.size.toLong()); queue.clear() }
     }
 
     private companion object {

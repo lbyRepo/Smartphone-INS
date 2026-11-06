@@ -368,6 +368,15 @@ class NavigationEngine(
             return
         }
         val resumingSuspendedAiding = gnssAidingSuspended
+        if (resumingSuspendedAiding && lastGnss != null) {
+            val altitude = if (fix.hasAltitude) fix.altitudeEllipsoidM else ecefToGeodetic(positionEcef).altitudeM
+            val observed = geodeticToEcef(fix.latitudeDeg, fix.longitudeDeg, altitude)
+            if (!positionConsistentWithPreviousFix(fix, lastGnss, observed) &&
+                !trackConsistentRejectedPosition(observed, fix.horizontalAccuracyM.coerceAtLeast(0.5))) {
+                recordRawGnss(fix)
+                return
+            }
+        }
         gnssAidingSuspended = false
         val previousFix = lastGnss
         lastGnss = fix
@@ -515,9 +524,12 @@ class NavigationEngine(
     fun setGnssAidingEnabled(enabled: Boolean) {
         if (gnssAidingEnabled == enabled) return
         gnssAidingEnabled = enabled
-        gnssAidingSuspended = !enabled
+        // Keep suspension latched until the next accepted reacquisition fix.
+        if (!enabled) gnssAidingSuspended = true
         courseAided = false
         if (!enabled) {
+            lastGnssPositionUpdateNanos = Long.MIN_VALUE
+            lastGnssVelocityUpdateNanos = Long.MIN_VALUE
             gnssStationaryUntilNanos = Long.MIN_VALUE
             consecutiveStationaryGnssFixes = 0
             stationaryConstrained = false

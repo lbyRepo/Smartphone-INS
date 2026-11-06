@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
 class NavigationService : Service() {
+    private val csvSeekGeneration = AtomicLong(0)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     @Volatile private var engine = NavigationEngine()
     private lateinit var tcp: TcpInsServer
@@ -388,7 +389,7 @@ class NavigationService : Service() {
                     val publishedImuRate = imuRate
                     if (uiUpdatePending.compareAndSet(false, true)) scope.launch {
                         try {
-                            val logErrors = listOfNotNull(csvLogger.error, recorder.error).distinct().joinToString(" · ").ifEmpty { null }
+                            val logErrors = listOfNotNull(csvLogger.error, recorder.error, tcp.error, aoa.error).distinct().joinToString(" · ").ifEmpty { null }
                             val lostRecords = csvLogger.droppedRecords + recorder.droppedRecords
                             val status = solutionStatus(solution) + when {
                                 logErrors != null -> " · $logErrors"
@@ -732,15 +733,21 @@ class NavigationService : Service() {
                 index.cursor(csvReplayRowIndex).use { cursor ->
                     var previousTime = if (csvReplayRowIndex > 0) index.row(csvReplayRowIndex - 1).monotonicNanos else null
                     var lastUiUpdate = 0L
+                    val deadline = ReplayDeadline(SystemClock::elapsedRealtimeNanos)
+                    var previousSpeed = InsRepository.state.value.csvReplay.speed
                     while (isActive) {
+                        val wasPaused = InsRepository.state.value.csvReplay.phase != CsvReplayPhase.PLAYING
                         while (isActive && InsRepository.state.value.csvReplay.phase != CsvReplayPhase.PLAYING) delay(20)
+                        if (wasPaused) deadline.rebase()
                         if (!isActive) break
                         val row = cursor.next() ?: break
                         previousTime?.let { prior ->
                             val deltaNanos = (row.monotonicNanos - prior).coerceAtLeast(0L)
                             val speed = InsRepository.state.value.csvReplay.speed.coerceAtLeast(0.1)
-                            val delayMillis = (deltaNanos / speed / 1_000_000.0).toLong()
-                            if (delayMillis > 0) delay(delayMillis)
+                            if (speed != previousSpeed) deadline.rebase()
+                            previousSpeed = speed
+                            val waitNanos = deadline.advance(deltaNanos, speed)
+                            if (waitNanos > 0) delay((waitNanos + 999_999L) / 1_000_000L)
                             while (isActive && InsRepository.state.value.csvReplay.phase != CsvReplayPhase.PLAYING) delay(20)
                         }
                         if (!isActive) break
@@ -842,8 +849,12 @@ class NavigationService : Service() {
     private fun seekCsvReplay(positionMillis: Long) {
         val index = csvReplayIndex ?: return
         if (!csvReplayPrepared) prepareCsvReplay(index)
-        csvReplaySeekJob?.cancel()
+        val generation = csvSeekGeneration.incrementAndGet()
+        val previousSeek = csvReplaySeekJob
+        previousSeek?.cancel()
         csvReplaySeekJob = scope.launch(Dispatchers.IO) {
+            previousSeek?.join()
+            ensureActive()
             csvReplayJob?.cancelAndJoin()
             csvReplayJob = null
             replayCsvLogger?.stop()
@@ -868,6 +879,7 @@ class NavigationService : Service() {
                 if (targetPosition > 0L) {
                     index.cursor(0).use { cursor ->
                         while (cursor.index <= targetRow) {
+                            ensureActive()
                             val row = cursor.next() ?: break
                             processCsvReplayRow(candidate, row, feed, aidingEnabled = true)
                             finalRow = row
@@ -876,6 +888,8 @@ class NavigationService : Service() {
                 }
                 val snapshot = finalRow?.let { candidate.snapshot(it.monotonicNanos, it.unixMillis) }
                     ?: NavigationSolution.empty(index.firstMonotonicNanos, index.row(0).unixMillis)
+                ensureActive()
+                if (csvSeekGeneration.get() != generation) throw CancellationException("Superseded replay seek")
                 engine = candidate
                 csvReplayFeedState = feed
                 csvReplayRowIndex = if (targetPosition > 0L) targetRow + 1 else 0

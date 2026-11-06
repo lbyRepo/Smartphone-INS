@@ -2,11 +2,10 @@ package com.example.phoneins.navigation
 
 import kotlin.math.abs
 import kotlin.math.hypot
-import kotlin.math.max
 import kotlin.math.sqrt
 
 enum class TransferAlignmentPhase {
-    DISABLED, WAITING_FOR_MASTER, SYNCING, STRAIGHT_1, MANEUVER, STRAIGHT_2, CONVERGED, APPLIED, ERROR,
+    DISABLED, WAITING_FOR_MASTER, STRAIGHT_1, MANEUVER, STRAIGHT_2, CONVERGED,
 }
 
 data class TransferAlignmentResult(
@@ -17,22 +16,11 @@ data class TransferAlignmentResult(
     val attitudeStdDeg: Vec3,
     val accelerometerBiasStdMps2: Vec3,
     val gyroBiasStdRadps: Vec3,
-    val residualRmsMps: Double,
 )
 
 data class TransferAlignmentStatus(
     val phase: TransferAlignmentPhase = TransferAlignmentPhase.DISABLED,
-    val enabled: Boolean = false,
-    val masterConnected: Boolean = false,
-    val masterRateHz: Double = 0.0,
-    val masterAgeMillis: Long = Long.MAX_VALUE,
-    val clockUncertaintyMillis: Double = Double.NaN,
-    val leverArmFrdM: Vec3 = Vec3.ZERO,
-    val residualNedMps: Vec3 = Vec3.ZERO,
-    val residualRmsMps: Double = Double.NaN,
     val mountingEulerDeg: Vec3 = Vec3.ZERO,
-    val mountingStdDeg: Vec3 = Vec3(Double.NaN, Double.NaN, Double.NaN),
-    val latestMasterReference: MasterInsReference? = null,
     val message: String = "Transfer alignment disabled",
 )
 
@@ -52,13 +40,11 @@ class TransferAlignmentEstimator(
     private var previousReference: MasterInsReference? = null
     private var straightStartNanos = Long.MIN_VALUE
     private var firstStraightHeadingRad = Double.NaN
-    private var postTurnStartNanos = Long.MIN_VALUE
     private var acceptedUpdates = 0
     private var totalUpdates = 0
     private var squaredResidualSum = 0.0
     private var residualSamples = 0
     private var latestResidual = Vec3.ZERO
-    private var fixedResult: TransferAlignmentResult? = null
     private val angleHistory = ArrayDeque<Pair<Long, Vec3>>()
 
     init { resetCovariance() }
@@ -71,13 +57,11 @@ class TransferAlignmentEstimator(
         previousReference = null
         straightStartNanos = Long.MIN_VALUE
         firstStraightHeadingRad = Double.NaN
-        postTurnStartNanos = Long.MIN_VALUE
         acceptedUpdates = 0
         totalUpdates = 0
         squaredResidualSum = 0.0
         residualSamples = 0
         latestResidual = Vec3.ZERO
-        fixedResult = null
         angleHistory.clear()
     }
 
@@ -109,7 +93,7 @@ class TransferAlignmentEstimator(
         latestResidual = phone.velocityNedMps - masterAtPhone
 
         when (phase) {
-            TransferAlignmentPhase.WAITING_FOR_MASTER, TransferAlignmentPhase.SYNCING -> {
+            TransferAlignmentPhase.WAITING_FOR_MASTER -> {
                 phase = TransferAlignmentPhase.STRAIGHT_1
                 straightStartNanos = if (stableStraight) reference.phoneMonotonicNanos else Long.MIN_VALUE
             }
@@ -126,7 +110,6 @@ class TransferAlignmentEstimator(
                 if (abs(wrapRadians(headingRad - firstStraightHeadingRad)) >= REQUIRED_HEADING_CHANGE_RAD && stableStraight) {
                     phase = TransferAlignmentPhase.STRAIGHT_2
                     straightStartNanos = reference.phoneMonotonicNanos
-                    postTurnStartNanos = reference.phoneMonotonicNanos
                 }
             }
             TransferAlignmentPhase.STRAIGHT_2 -> {
@@ -143,7 +126,6 @@ class TransferAlignmentEstimator(
     }
 
     fun result(reference: MasterInsReference, phone: NavigationSolution): TransferAlignmentResult? {
-        if (phase == TransferAlignmentPhase.APPLIED) return fixedResult
         if (phase != TransferAlignmentPhase.CONVERGED) return null
         val correction = Vec3(-state[ATTITUDE], -state[ATTITUDE + 1], -state[ATTITUDE + 2])
         val correctedBodyToNed = multiply3(
@@ -161,25 +143,8 @@ class TransferAlignmentEstimator(
             attitudeStdDeg = attitudeStdDeg(),
             accelerometerBiasStdMps2 = stateStd(ACCEL_BIAS),
             gyroBiasStdRadps = stateStd(GYRO_BIAS),
-            residualRmsMps = residualRms(),
-        ).also { fixedResult = it }
+        )
     }
-
-    fun markApplied() { if (phase == TransferAlignmentPhase.CONVERGED) phase = TransferAlignmentPhase.APPLIED }
-
-    /** Presents a safe paused link state without discarding the shadow-filter state. */
-    fun pausedStatus(syncing: Boolean, message: String): TransferAlignmentStatus = TransferAlignmentStatus(
-        phase = if (syncing) TransferAlignmentPhase.SYNCING else TransferAlignmentPhase.WAITING_FOR_MASTER,
-        enabled = true,
-        leverArmFrdM = leverArm,
-        residualNedMps = latestResidual,
-        residualRmsMps = residualRms(),
-        mountingEulerDeg = Vec3(
-            Math.toDegrees(-state[ATTITUDE]), Math.toDegrees(-state[ATTITUDE + 1]), Math.toDegrees(-state[ATTITUDE + 2]),
-        ),
-        mountingStdDeg = attitudeStdDeg(),
-        message = message,
-    )
 
     private fun propagate(phone: NavigationSolution, dt: Double) {
         val f = DoubleArray(STATE_SIZE * STATE_SIZE)
@@ -252,28 +217,19 @@ class TransferAlignmentEstimator(
     }
 
     private fun status(reference: MasterInsReference, phone: NavigationSolution): TransferAlignmentStatus {
-        val mount = if (phase == TransferAlignmentPhase.CONVERGED || phase == TransferAlignmentPhase.APPLIED) {
+        val mount = if (phase == TransferAlignmentPhase.CONVERGED) {
             result(reference, phone)?.mountingEulerDeg ?: Vec3.ZERO
         } else Vec3(
             Math.toDegrees(-state[ATTITUDE]), Math.toDegrees(-state[ATTITUDE + 1]), Math.toDegrees(-state[ATTITUDE + 2]),
         )
         return TransferAlignmentStatus(
             phase = phase,
-            enabled = true,
-            masterConnected = true,
-            clockUncertaintyMillis = reference.timeUncertaintyNanos / 1e6,
-            leverArmFrdM = leverArm,
-            residualNedMps = latestResidual,
-            residualRmsMps = residualRms(),
             mountingEulerDeg = mount,
-            mountingStdDeg = attitudeStdDeg(),
-            latestMasterReference = reference,
             message = when (phase) {
                 TransferAlignmentPhase.STRAIGHT_1 -> "Drive straight and steadily"
                 TransferAlignmentPhase.MANEUVER -> "Perform a turn of at least 20°"
                 TransferAlignmentPhase.STRAIGHT_2 -> "Drive straight again while alignment converges"
                 TransferAlignmentPhase.CONVERGED -> "Transfer alignment converged"
-                TransferAlignmentPhase.APPLIED -> "Transfer alignment applied"
                 else -> "Waiting for master INS"
             },
         )

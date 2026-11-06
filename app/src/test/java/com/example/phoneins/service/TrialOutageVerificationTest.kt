@@ -1,7 +1,6 @@
 package com.example.phoneins.service
 
 import com.example.phoneins.navigation.GnssFix
-import com.example.phoneins.navigation.MotionProfile
 import com.example.phoneins.navigation.NavigationEngine
 import com.example.phoneins.navigation.QualityFlag
 import com.example.phoneins.navigation.ReplayInitialization
@@ -11,7 +10,6 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.Assert.assertTrue
 import java.io.File
-import java.io.PrintWriter
 import java.security.MessageDigest
 import kotlin.math.abs
 import kotlin.math.cos

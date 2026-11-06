@@ -33,7 +33,13 @@ It was built as a rapid AI-assisted engineering prototype: the emphasis is on mo
 
 ## Project status
 
-Current app version: `0.3.20`.
+Current app version: `0.3.21`.
+
+Version 0.3.21 is a maintenance cleanup. It removes unreferenced transfer-alignment
+bookkeeping, status fields and helpers, splits map/replay state out of the oversized UI and
+CSV-replay files, and drops unused UI state. The configured master-to-phone lever arm is now
+actually forwarded to the transfer-alignment estimator; previous builds accepted the input but
+ignored it. Navigation, protocol, CSV columns and outage behavior are otherwise unchanged.
 
 Version 0.3.19 repairs coupled estimation in the 15-state ECEF error-state filter. Previously,
 bias learning was an on/off switch: while the IMU quality monitor withheld learning (rough road,

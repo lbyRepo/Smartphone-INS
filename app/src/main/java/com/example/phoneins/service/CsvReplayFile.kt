@@ -1,17 +1,13 @@
 package com.example.phoneins.service
 
-import android.content.Context
-import android.net.Uri
-import android.provider.OpenableColumns
 import com.example.phoneins.data.TrialLogSummary
+import com.example.phoneins.navigation.GnssFix
 import com.example.phoneins.navigation.MotionProfile
 import com.example.phoneins.navigation.QualityFlag
+import com.example.phoneins.navigation.TimedImuSample
 import com.example.phoneins.navigation.Vec3
 import java.io.File
 import java.io.RandomAccessFile
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 internal data class CsvReplayRow(
     val imuFresh: Boolean = true,
@@ -76,15 +72,6 @@ internal class CsvReplayIndex private constructor(
         }
         return low
     }
-
-    fun summary(): TrialLogSummary = TrialLogSummary(
-        id = file.canonicalPath,
-        displayName = file.name,
-        modifiedMillis = file.lastModified(),
-        durationMillis = durationMillis,
-        rowCount = rowCount,
-        sizeBytes = file.length(),
-    )
 
     companion object {
         fun open(file: File): CsvReplayIndex {
@@ -285,44 +272,11 @@ internal class CsvReplayCursor(
     override fun close() = input.close()
 }
 
-internal class TrialLogCatalog(private val context: Context) {
-    private val importsDirectory = File(context.filesDir, "replay_imports").apply { mkdirs() }
-    private val trialDirectory get() = CsvTrialLogger.trialLogDirectory(context)
-
-    fun recent(activeFile: File? = null): List<TrialLogSummary> {
-        val activePath = activeFile?.canonicalPath
-        return (trialDirectory.listFiles()?.toList().orEmpty() + importsDirectory.listFiles()?.toList().orEmpty())
-            .asSequence()
-            .filter { it.isFile && it.extension.equals("csv", ignoreCase = true) && it.canonicalPath != activePath }
-            .sortedByDescending(File::lastModified)
-            .mapNotNull { runCatching { CsvReplayIndex.quickSummary(it) }.getOrNull() }
-            .take(10)
-            .toList()
-    }
-
-    fun import(uri: Uri): File {
-        val resolver = context.contentResolver
-        val displayName = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) cursor.getString(0) else null
-        } ?: uri.lastPathSegment ?: "imported_trial.csv"
-        val safeStem = displayName.substringBeforeLast('.').replace(Regex("[^A-Za-z0-9._-]+"), "_").take(80).ifEmpty { "imported_trial" }
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-        var output = File(importsDirectory, "${safeStem}_$stamp.csv")
-        var suffix = 1
-        while (output.exists()) output = File(importsDirectory, "${safeStem}_${stamp}_${suffix++}.csv")
-        resolver.openInputStream(uri).use { input ->
-            requireNotNull(input) { "Unable to open selected CSV" }
-            output.outputStream().buffered().use(input::copyTo)
-        }
-        CsvReplayIndex.open(output)
-        return output
-    }
-
-    fun resolve(id: String): File {
-        val file = File(id).canonicalFile
-        val allowed = listOf(trialDirectory.canonicalFile, importsDirectory.canonicalFile)
-            .any { directory -> file.path.startsWith(directory.path + File.separator) }
-        require(allowed && file.isFile) { "Selected replay log is unavailable" }
-        return file
-    }
-}
+/** Per-run replay feed bookkeeping shared by the live service and the audit harnesses. */
+internal data class CsvReplayFeedState(
+    var lastImuNanos: Long = Long.MIN_VALUE,
+    var lastGnssNanos: Long = Long.MIN_VALUE,
+    var initialized: Boolean = false,
+    var latestImu: TimedImuSample? = null,
+    var latestGnss: GnssFix? = null,
+)

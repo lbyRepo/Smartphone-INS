@@ -39,7 +39,6 @@ data class InsUiState(
     val coarseRollDeg: Double = Double.NaN,
     val coarsePitchDeg: Double = Double.NaN,
     val recentTrialLogs: List<TrialLogSummary> = emptyList(),
-    val masterServerPort: Int? = null,
     val masterConnected: Boolean = false,
     val masterRateHz: Double = 0.0,
     val masterMessage: String? = null,
@@ -69,16 +68,7 @@ data class CsvReplayUiState(
     val message: String? = null,
     val outputCsvName: String? = null,
     val outputCsvPath: String? = null,
-) {
-    val active: Boolean get() = phase in setOf(
-        CsvReplayPhase.INDEXING,
-        CsvReplayPhase.READY,
-        CsvReplayPhase.PLAYING,
-        CsvReplayPhase.PAUSED,
-        CsvReplayPhase.SEEKING,
-        CsvReplayPhase.COMPLETED,
-    )
-}
+)
 
 object InsRepository {
     private val mutableState = MutableStateFlow(InsUiState())

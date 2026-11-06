@@ -2,7 +2,6 @@ package com.example.phoneins.service
 
 import android.app.*
 import android.Manifest
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -1233,11 +1232,3 @@ class NavigationService : Service() {
         )
     }
 }
-
-internal data class CsvReplayFeedState(
-    var lastImuNanos: Long = Long.MIN_VALUE,
-    var lastGnssNanos: Long = Long.MIN_VALUE,
-    var initialized: Boolean = false,
-    var latestImu: TimedImuSample? = null,
-    var latestGnss: GnssFix? = null,
-)

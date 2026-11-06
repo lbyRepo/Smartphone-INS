@@ -33,11 +33,6 @@ class NavigationEngine(
     private val accelSmoothingWindow = ArrayDeque<Vec3>()
     private val gyroSmoothingWindow = ArrayDeque<Vec3>()
     private var alignmentPhase = AlignmentPhase.NONE
-    private var alignmentLeverArmFrdM = Vec3.ZERO
-    private var alignmentStartNanos = Long.MIN_VALUE
-    private var masterVelocityAccepted = 0
-    private var masterVelocityTotal = 0
-    private var lastMasterBodyToNed: Quaternion? = null
     private var mountingEulerDeg = Vec3.ZERO
     private var mountingStdDeg = Vec3(Double.NaN, Double.NaN, Double.NaN)
     private val transferEstimator = TransferAlignmentEstimator()
@@ -86,10 +81,6 @@ class NavigationEngine(
         accelSmoothingWindow.clear()
         gyroSmoothingWindow.clear()
         alignmentPhase = AlignmentPhase.NONE
-        alignmentStartNanos = Long.MIN_VALUE
-        masterVelocityAccepted = 0
-        masterVelocityTotal = 0
-        lastMasterBodyToNed = null
         mountingEulerDeg = Vec3.ZERO
         mountingStdDeg = Vec3(Double.NaN, Double.NaN, Double.NaN)
         initializationNanos = Long.MIN_VALUE
@@ -239,15 +230,10 @@ class NavigationEngine(
     @Synchronized
     fun beginTransferAlignment(leverArmFrdM: Vec3 = Vec3.ZERO) {
         require(initSource == InitSource.NONE) { "Reset the filter before starting master alignment" }
-        alignmentLeverArmFrdM = leverArmFrdM
         alignmentPhase = AlignmentPhase.ALIGNING
-        alignmentStartNanos = Long.MIN_VALUE
-        masterVelocityAccepted = 0
-        masterVelocityTotal = 0
-        lastMasterBodyToNed = null
         mountingEulerDeg = Vec3.ZERO
         mountingStdDeg = Vec3(Double.NaN, Double.NaN, Double.NaN)
-        transferEstimator.reset()
+        transferEstimator.reset(leverArmFrdM)
     }
 
     @Synchronized
@@ -285,8 +271,6 @@ class NavigationEngine(
                 Math.toRadians(ALIGNMENT_MASTER_YAW_PRIOR_DEG)))
             resetBodyStateBlockCovariance(ACCEL_BIAS, doubleArrayOf(0.4, 0.4, 0.4))
             resetBodyStateBlockCovariance(GYRO_BIAS, doubleArrayOf(0.03, 0.03, 0.03))
-            alignmentStartNanos = reference.phoneMonotonicNanos
-            lastMasterBodyToNed = masterBodyToNed
             return
         }
 
@@ -307,8 +291,7 @@ class NavigationEngine(
     }
 
     /** Applies the converged transfer-alignment correction to the main filter state. */
-    @Synchronized
-    fun applyTransferAlignment(result: TransferAlignmentResult) {
+    private fun applyTransferAlignment(result: TransferAlignmentResult) {
         if (initSource == InitSource.NONE) return
         val geo = ecefToGeodetic(positionEcef)
         val nedToEcef = transpose3(ecefToNedMatrix(geo.latitudeRad, geo.longitudeRad))
@@ -1145,11 +1128,7 @@ class NavigationEngine(
         const val IMU_SMOOTHING_WINDOW_SAMPLES = 1
 
         /** Transfer-alignment promotion thresholds and priors. */
-        const val ALIGNMENT_READY_ATTITUDE_STD_DEG = 3.0
-        const val ALIGNMENT_READY_VELOCITY_STD_MPS = 0.35
         const val ALIGNMENT_MASTER_YAW_PRIOR_DEG = 30.0
-        private val ALIGNMENT_MIN_DURATION_NANOS = 10L * 1_000_000_000L
-        private const val ALIGNMENT_MIN_ACCEPTED_UPDATES = 50
         private const val STATE_SIZE = 15
         private const val POSITION = 0
         private const val VELOCITY = 3

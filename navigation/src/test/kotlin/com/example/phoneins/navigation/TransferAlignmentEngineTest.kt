@@ -1,6 +1,5 @@
 package com.example.phoneins.navigation
 
-import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.abs
@@ -33,8 +32,6 @@ class TransferAlignmentEngineTest {
         var t = 0.0
         var speed = 3.0
         var yawRad = 0.0
-        var imuTime = startNanos
-        var refTime = startNanos
         var nextRef = 0.0
         while (t <= 75.0) {
             val accel = when {
@@ -81,10 +78,8 @@ class TransferAlignmentEngineTest {
                 out += Tick(TimedImuSample(tNanos, slaveForceBody, slaveGyroBody), null, tNanos)
             }
             t += 0.01
-            imuTime = tNanos
             speed = (speed + accel * 0.01).coerceAtLeast(0.0)
             yawRad += yawRate * 0.01
-            refTime = imuTime
         }
         // Attach the aligned IMU timestamps to the final reference too.
         return out

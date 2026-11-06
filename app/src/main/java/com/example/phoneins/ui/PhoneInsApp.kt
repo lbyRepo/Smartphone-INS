@@ -1,13 +1,11 @@
 package com.example.phoneins.ui
 
-import android.content.Context
 import android.content.res.Configuration
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -51,7 +49,6 @@ import org.osmdroid.util.GeoPoint
 import java.util.Locale
 import java.util.Date
 import java.text.SimpleDateFormat
-import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -74,36 +71,6 @@ fun PhoneInsTheme(content: @Composable () -> Unit) {
 
 internal enum class Destination(val label: String, val glyph: String) {
     DASHBOARD("INS", "◎"), RAW("Raw", "≋"), SETUP("Setup", "⚙")
-}
-
-/** Basemap shown behind the position plot: cached online street tiles, or the plain grid. */
-internal enum class MapBasemap(val label: String) {
-    TILES("Street map"),
-    GRID("Grid"),
-}
-
-private const val UI_PREFS = "phoneins_ui"
-private const val KEY_MAP_BASEMAP = "map_basemap"
-
-internal fun readStoredMapBasemap(context: Context): MapBasemap =
-    runCatching {
-        context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_MAP_BASEMAP, null)
-            ?.let { stored -> MapBasemap.entries.firstOrNull { it.name == stored } }
-    }.getOrNull() ?: MapBasemap.TILES
-
-internal fun storeMapBasemap(context: Context, basemap: MapBasemap) {
-    runCatching {
-        context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_MAP_BASEMAP, basemap.name)
-            .apply()
-    }
-}
-
-internal fun clearStoredMapBasemap(context: Context) {
-    runCatching {
-        context.getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).edit().remove(KEY_MAP_BASEMAP).commit()
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -432,61 +399,6 @@ private fun GnssOutageControl(
     }
 }
 
-internal data class TrailPoint(val monotonicNanos: Long, val latitudeDeg: Double, val longitudeDeg: Double)
-
-/** Upper bound on plotted history per trail; longer sessions drop the oldest points. */
-internal const val MAX_TRAIL_POINTS = 2_000
-
-internal class PositionMapState {
-    val insTrail = mutableStateListOf<TrailPoint>()
-    val gnssTrail = mutableStateListOf<TrailPoint>()
-    var origin by mutableStateOf<TrailPoint?>(null)
-        private set
-
-    /** Bumped whenever plotted trail contents change, so the UI re-derives snapshots only on change. */
-    var version by mutableLongStateOf(0L)
-        private set
-    private var lastSequence: Long? = null
-
-    internal fun update(solution: NavigationSolution) {
-        val sequenceReset = lastSequence?.let { solution.sequence < it } == true
-        if (!solution.initialized || sequenceReset) {
-            clear()
-            if (!solution.initialized) return
-        }
-        val insValid = solution.latitudeDeg.isFinite() && solution.longitudeDeg.isFinite()
-        if (insValid) {
-            val point = TrailPoint(solution.monotonicNanos, solution.latitudeDeg, solution.longitudeDeg)
-            if (origin == null) origin = point
-            appendTrail(insTrail, point)
-        }
-        solution.latestGnss?.takeIf { it.latitudeDeg.isFinite() && it.longitudeDeg.isFinite() }?.let {
-            appendTrail(gnssTrail, TrailPoint(it.monotonicNanos, it.latitudeDeg, it.longitudeDeg))
-        }
-        lastSequence = solution.sequence
-    }
-
-    private fun appendTrail(trail: MutableList<TrailPoint>, point: TrailPoint) {
-        val previous = trail.lastOrNull()
-        val elapsed = previous?.let { point.monotonicNanos - it.monotonicNanos } ?: Long.MAX_VALUE
-        val distance = previous?.let { point.toLocalMetres(it).let { local -> kotlin.math.hypot(local.x, local.y) } } ?: Double.POSITIVE_INFINITY
-        if (previous == null || elapsed >= 1_000_000_000L || (elapsed >= 100_000_000L && distance >= 1.0)) {
-            trail += point
-            while (trail.size > MAX_TRAIL_POINTS) trail.removeAt(0)
-            version++
-        }
-    }
-
-    private fun clear() {
-        val hadContent = insTrail.isNotEmpty() || gnssTrail.isNotEmpty() || origin != null
-        insTrail.clear()
-        gnssTrail.clear()
-        origin = null
-        lastSequence = null
-        if (hadContent) version++
-    }
-}
-
 /** Local-metre geometry for the grid renderer, derived only when plotted history changes. */
 private data class MapGeometry(
     val centreNorthMetres: Double,
@@ -790,14 +702,6 @@ private fun MapLegend(color: Color, label: String, filled: Boolean) {
         Text(label, fontSize = 14.sp)
     }
 }
-
-private fun TrailPoint.toLocalMetres(origin: TrailPoint): Vec3 {
-    val north = (latitudeDeg - origin.latitudeDeg) * 111_132.0
-    val east = (longitudeDeg - origin.longitudeDeg) * 111_320.0 * cos(Math.toRadians(origin.latitudeDeg))
-    return Vec3(north, east, 0.0)
-}
-
-internal fun TrailPoint.toLocalMetresForTest(origin: TrailPoint): Vec3 = toLocalMetres(origin)
 
 private fun niceMapSpan(required: Double): Double = listOf(10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0)
     .firstOrNull { it >= required } ?: required
@@ -1145,7 +1049,7 @@ private fun MasterAlignmentContent(state: InsUiState, sendAction: (String, Map<S
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Master INS transfer alignment", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Text("The slave initializes from the master INS pose; master velocity and attitude are measurements. Align by driving straight, turning at least 20 degrees, then straight again. Position follows the master until the alignment is ready; GNSS resumes afterwards.", fontSize = 12.sp)
-        AdaptiveKeyValueRow("Master link", state.masterMessage ?: "Server listening on port ${state.masterServerPort ?: 29501}")
+        AdaptiveKeyValueRow("Master link", state.masterMessage ?: "Server listening on port 29501")
         AdaptiveKeyValueRow("Master rate", if (state.masterConnected) "%.1f Hz".format(state.masterRateHz) else "Not connected")
         AdaptiveKeyValueRow("Alignment status", state.solution.alignmentMessage)
         if (state.solution.alignmentPhase == AlignmentPhase.READY) {
@@ -1474,7 +1378,6 @@ private fun AdaptiveKeyValueRow(label: String, value: String, valueIsError: Bool
 }
 
 private fun Double.f(decimals: Int): String = if (isFinite()) String.format(Locale.US, "%.${decimals}f", this) else "—"
-private fun Vec3.f3(decimals: Int) = "${x.f(decimals)} / ${y.f(decimals)} / ${z.f(decimals)}"
 
 @Preview(name = "Dashboard light", showBackground = true, widthDp = 393, heightDp = 852)
 @Composable

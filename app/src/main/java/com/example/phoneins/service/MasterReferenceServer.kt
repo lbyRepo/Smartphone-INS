@@ -13,10 +13,7 @@ import kotlin.concurrent.thread
 
 data class MasterLinkStatus(
     val connected: Boolean = false,
-    val synchronized: Boolean = false,
     val rateHz: Double = 0.0,
-    val ageMillis: Long = Long.MAX_VALUE,
-    val clockUncertaintyMillis: Double = Double.NaN,
     val message: String = "Waiting for master INS",
 )
 
@@ -87,8 +84,6 @@ class MasterReferenceServer(
                         onStatus(
                             MasterLinkStatus(
                                 connected = true,
-                                synchronized = synchronizer.uncertaintyNanos < MAX_CLOCK_UNCERTAINTY_NANOS,
-                                clockUncertaintyMillis = synchronizer.uncertaintyNanos * 1e-6,
                                 message = if (synchronizer.uncertaintyNanos < MAX_CLOCK_UNCERTAINTY_NANOS) "Master synchronized" else "Clock uncertainty exceeds 10 ms",
                             ),
                         )
@@ -108,10 +103,7 @@ class MasterReferenceServer(
                         val rate = if (duration > 0.0) (referenceTimes.size - 1) / duration else 0.0
                         val status = MasterLinkStatus(
                             connected = true,
-                            synchronized = true,
                             rateHz = rate,
-                            ageMillis = age / 1_000_000L,
-                            clockUncertaintyMillis = synchronizer.uncertaintyNanos * 1e-6,
                             message = if (duration >= 1.0 && rate < MIN_MASTER_RATE_HZ) "Master rate below 20 Hz" else "Master reference valid",
                         )
                         onStatus(status)
